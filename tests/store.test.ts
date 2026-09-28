@@ -1,0 +1,26 @@
+import { describe,it,expect,afterEach } from 'vitest';
+import { mkdtempSync,rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Store } from '../src/main/store';
+import { excelBuffer,printHtml } from '../src/main/exports';
+import ExcelJS from 'exceljs';
+const dirs:string[]=[];const stores:Store[]=[];
+const setup=()=>{const dir=mkdtempSync(path.join(os.tmpdir(),'kayan-test-'));dirs.push(dir);const s=new Store(path.join(dir,'test.sqlite'));stores.push(s);return s;};
+const employee={code:'T01',name:'موظف تجريبي',job:'مهندس',costCenter:'مشروع تجريبي',startDate:'2026-01-01',endDate:'',paymentMethod:'نقدي',bankNote:'',graduation:'',phone:'',nationalId:'',address:'',basic:'6000',active:true,notes:''};
+const ready=(s:Store)=>{s.setSettings({company:'اختبار',roundingAccepted:true,penaltiesEnabled:false});s.saveEmployee(employee);const p=s.createPeriod('2026-09');const e=p.entries[0];s.saveEntry({periodId:p.id,id:e.id,version:e.version,inputs:e.inputs,checked:true});return s.approve(p.id);};
+afterEach(()=>{for(const s of stores.splice(0))s.close();for(const d of dirs.splice(0))rmSync(d,{recursive:true,force:true});});
+describe('حفظ الرواتب والتاريخ',()=>{
+  it('يحفظ القيم القديمة عند تعديل الموظف',()=>{const s=setup(),p=ready(s);const e=s.employees()[0];s.saveEmployee({...e,basic:'10000',name:'اسم معدل'});expect(s.period(p.id).entries[0].snapshot.name).toBe(employee.name);expect(s.period(p.id).entries[0].result!.net).toBe(594000);});
+  it('يرفض تعديل الشهر المعتمد',()=>{const s=setup(),p=ready(s),e=p.entries[0];expect(()=>s.saveEntry({periodId:p.id,id:e.id,version:e.version,inputs:e.inputs,checked:true})).toThrow();});
+  it('لا يكرر شهرًا أو كود موظف',()=>{const s=setup();s.saveEmployee(employee);expect(()=>s.saveEmployee(employee)).toThrow();s.createPeriod('2026-09');expect(()=>s.createPeriod('2026-09')).toThrow();});
+  it('يرفض التعديل بإصدار قديم',()=>{const s=setup(),e=s.saveEmployee(employee);s.saveEmployee({...e,job:'محاسب'});expect(()=>s.saveEmployee({...e,job:'سائق'})).toThrow();});
+  it('يرفض الاعتماد غير المراجع أو الصافي السالب',()=>{const s=setup();s.saveEmployee(employee);const p=s.createPeriod('2026-09');s.setSettings({company:'شركة',roundingAccepted:true,penaltiesEnabled:false});expect(()=>s.approve(p.id)).toThrow();const e=s.period(p.id).entries[0];s.saveEntry({periodId:p.id,id:e.id,version:e.version,inputs:{...e.inputs,advance:'10000'},checked:true});expect(()=>s.approve(p.id)).toThrow();expect(s.period(p.id).status).toBe('draft');});
+  it('لا يحذف موظفًا مرتبطًا بمسير',()=>{const s=setup(),p=ready(s);s.removeEmployee(p.entries[0].employeeId);expect(s.employees()).toHaveLength(0);expect(s.period(p.id).entries[0].result!.net).toBe(594000);});
+  it('حفظ الدفعة متكامل عند وجود صف خاطئ',()=>{const s=setup();s.saveEmployee(employee);s.saveEmployee({...employee,code:'T02',name:'موظف ثان'});const p=s.createPeriod('2026-09');expect(()=>s.saveEntries(p.entries.map((e,i)=>({periodId:p.id,id:e.id,version:e.version,inputs:{...e.inputs,basic:i?'invalid':'7000'},checked:false})))).toThrow();expect(s.period(p.id).entries[0].inputs.basic).toBe('6000');});
+  it('يستبعد المعين بعد الشهر ويدرج المنتهي خلاله',()=>{const s=setup();s.saveEmployee({...employee,startDate:'2026-10-01'});s.saveEmployee({...employee,code:'T02',active:false,endDate:'2026-09-15'});const p=s.createPeriod('2026-09');expect(p.entries).toHaveLength(1);expect(p.entries[0].snapshot.code).toBe('T02');});
+  it('يحافظ على حالة الصرف دون تكرار',()=>{const s=setup(),p=ready(s);s.pay({periodId:p.id,ids:[p.entries[0].id]});s.pay({periodId:p.id,ids:[p.entries[0].id]});expect(s.state().audit.filter(a=>a.action==='تسجيل صرف كامل')).toHaveLength(1);});
+  it('تطابق نسخة قاعدة البيانات',async()=>{const s=setup(),p=ready(s);const file=path.join(path.dirname(s.filename),'copy.sqlite');await s.backup(file);const restored=new Store(file);stores.push(restored);expect(restored.period(p.id)).toEqual(s.period(p.id));});
+  it('Excel أرقام ثابتة والإجماليات مطابقة',async()=>{const s=setup(),p=ready(s);const opts={periodId:p.id,entryIds:p.entries.map(e=>e.id),template:'slip' as const,paper:'A4' as const,hideZeros:true,explanations:true,monochrome:false};const b=await excelBuffer(p,opts);const w=new ExcelJS.Workbook();await w.xlsx.load(b as any);const sheet=w.worksheets[0];const heads=sheet.getRow(5).values as string[];const net=heads.indexOf('صافي المرتب');expect(sheet.getCell(6,net).value).toBe(5940);expect(sheet.getCell(7,net).value).toBe(5940);expect(sheet.getCell('C6').value).toBe(employee.name);});
+  it('يهرب الأسماء في مستند الطباعة',()=>{const s=setup();s.saveEmployee({...employee,name:'<script>test</script>'});const p=s.createPeriod('2026-09');const html=printHtml(p,{periodId:p.id,entryIds:p.entries.map(e=>e.id),template:'slip',paper:'A4',hideZeros:true,explanations:true,monochrome:false},'','');expect(html).toContain('&lt;script&gt;');expect(html).not.toContain('<script>test');});
+});

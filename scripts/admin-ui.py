@@ -1,0 +1,25 @@
+from pathlib import Path
+p=Path('src/renderer/main.tsx');s=p.read_text('utf-8').replace("import BulkEditor", "import AdminPanel,{PasswordPanel} from './AdminPanel';\nimport BulkEditor")
+s=s.replace("['dashboard',", "['admin', 'إدارة النظام', 'lock'],\n  ['dashboard',",1)
+s=s.replace('configured: boolean; unlocked: boolean }','configured: boolean; unlocked: boolean; user?:{id:string;username:string;name:string;role:string}|null }')
+s=s.replace("const [password, setPassword] = useState('');", "const [password, setPassword] = useState('');\n  const [username,setUsername]=useState('admin');\n  const isAdmin=auth?.user?.role==='admin';")
+s=s.replace("await api.call(auth?.configured ? 'auth.login' : 'auth.setup', password);\n    setPassword(''); setAuth({ configured: true, unlocked: true });", "const user=await api.call(auth?.configured ? 'auth.login' : 'auth.setup', auth?.configured?{username,password}:password);\n    setPassword('');setPage('dashboard');setPeriod(null); setAuth({ configured: true, unlocked: true,user });")
+s=s.replace('<Field label="كلمة المرور">', '<Field label="اسم الدخول"><input value={username} disabled={!auth.configured} required onChange={e=>setUsername(e.target.value)} autoComplete="username"/></Field><small>الحساب الحالي عند الترقية: admin بنفس كلمة المرور السابقة.</small><Field label="كلمة المرور">',1)
+s=s.replace('navItems.map(([id, title, icon])', "navItems.filter(([id])=>isAdmin||!['admin','formulas'].includes(id)).map(([id, title, icon])")
+s=s.replace("{page === 'formulas' && (", "{isAdmin && page === 'formulas' && (")
+s=s.replace("{page === 'settings' && <>", "{page === 'admin' && isAdmin && <AdminPanel state={state} onChanged={async()=>{const next=await refresh();setSelected([]);setEditEntry(null);if(period&&next.periods.some(p=>p.id===period.id))await openPeriod(period.id);else setPeriod(null);}}/>}\n          {page === 'settings' && <>")
+s=s.replace('<SettingsForm initial={state.settings}', '{isAdmin&&<SettingsForm initial={state.settings}')
+s=s.replace("notify('تم حفظ إعدادات الشركة');\n              })}/>", "notify('تم حفظ إعدادات الشركة');\n              })}/>}<PasswordPanel/>")
+s=s.replace("<button className=\"secondary full\" disabled={busy} onClick={() => run(async () => {\n                  if (await api.call('backup.restore'))", "{isAdmin&&<button className=\"secondary full\" disabled={busy} onClick={() => run(async () => {\n                  if (await api.call('backup.restore'))")
+s=s.replace('استعادة نسخة سابقة\n                </button>', 'استعادة نسخة سابقة\n                </button>}')
+s=s.replace('حذف سجل بلا معاملات', 'حذف الموظف وحفظ تاريخه')
+s=s.replace("body: 'يمكن حذف السجل فقط إذا لم يكن مرتبطًا بكشف رواتب. لإيقاف التعامل معه مع الاحتفاظ بتاريخه غيّر حالته إلى متوقف.'", "body: 'سيختفي الموظف من قوائم العمل والكشوف الجديدة. تبقى الرواتب والحركات السابقة محفوظة بأسمه ولا تُحذف. الإيقاف متاح أيضًا من حالة الموظف إذا أردت إعادته للعمل لاحقًا.'")
+s=s.replace("await refresh(); notify('تم حذف السجل');", "await refresh();if(period)await openPeriod(period.id); notify('حُذف الموظف من قوائم العمل وحُفظ تاريخه');")
+# Disable approval for operators at UI as well as authoritative IPC
+s=s.replace("title: 'اعتماد رواتب الشهر',", "title: 'اعتماد رواتب الشهر',")
+s=s.replace("<Icon name=\"check\"/>اعتماد الشهر", "<Icon name=\"check\"/>{isAdmin?'اعتماد الشهر':'الاعتماد بواسطة الأدمن'}")
+# Locate approval button and add role condition to its existing disabled
+idx=s.index("title: 'اعتماد رواتب الشهر'");a=s.rfind('<button',0,idx);b=s.index('onClick',a);segment=s[a:b];segment=segment.replace('disabled={', 'disabled={!isAdmin || ');s=s[:a]+segment+s[b:]
+p.write_text(s,'utf-8')
+p=Path('src/renderer/DailyPanel.tsx');s=p.read_text('utf-8').replace("state.employees.find(e=>e.id===r.employeeId)?.name", "(state.employees.find(e=>e.id===r.employeeId)?.name||period?.entries.find(e=>e.employeeId===r.employeeId)?.snapshot.name||'موظف سابق')");p.write_text(s,'utf-8')
+p=Path('tests/store.test.ts');s=p.read_text('utf-8').replace("expect(()=>s.removeEmployee(p.entries[0].employeeId)).toThrow();", "s.removeEmployee(p.entries[0].employeeId);expect(s.employees()).toHaveLength(0);expect(s.period(p.id).entries[0].result!.net).toBe(594000);");p.write_text(s,'utf-8')

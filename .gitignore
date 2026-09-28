@@ -1,0 +1,17 @@
+node_modules/
+dist/
+out/
+release/
+.env
+.env.*
+!.env.example
+reference/private/
+data/
+backups/
+exports/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+test-results/

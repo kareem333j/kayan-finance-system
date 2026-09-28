@@ -1,0 +1,5 @@
+project_id = "kayan-payroll"
+[functions.payroll]
+verify_jwt = false
+static_files = ["./functions/payroll/sql-wasm.wasm"]
+# The function validates every session with Auth getUser. Only login is public.
