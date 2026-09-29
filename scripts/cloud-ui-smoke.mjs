@@ -16,7 +16,9 @@ try{
  const state=await call('state'),status=await call('cloud.status'),auth=await call('auth.status');
  assert.ok(Array.isArray(state.employees));assert.ok(Array.isArray(state.periods));assert.equal(status.online,true);assert.equal(status.pending,0);assert.equal(auth.user.role,'super_admin');
  const accounts=await call('admin.accounts');assert.ok(accounts.length>=1);
- await page.screenshot({path:'test-results/cloud-dashboard.png',fullPage:true});
+ // Hidden packaged windows can throttle capture; assertions above exercise the
+ // actual packaged renderer without making a screenshot a publishing gate.
+ if(!process.env.KAYAN_PACKAGED_TEST)await page.screenshot({path:'test-results/cloud-dashboard.png',fullPage:true});
  await call('auth.lock');assert.equal((await call('auth.status')).unlocked,false);assert.deepEqual(errors,[]);
  console.log(`PASS desktop cloud login, ${state.employees.length} shared employees, ${accounts.length} accounts, sync status and logout`);
 }finally{await app.close();}
