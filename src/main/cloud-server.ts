@@ -32,6 +32,12 @@ export class CloudServer {
      const snapshot=structuredClone(operation.payload) as BusinessSnapshot;
      snapshot.audit=(snapshot.audit||[]).filter(r=>{const d=JSON.parse(r.detail);return !d.account&&!d.accountId;}).map(r=>{const d=JSON.parse(r.detail);delete d.actor;return {...r,detail:JSON.stringify(d)};});
      installBusiness(store,snapshot);store.settings();store.employees();result=true;
+    }else if(operation.method==='backup.restore'){
+     if(user.role==='operator')throw Error('هذه العملية متاحة للأدمن فقط');
+     if(operation.payload.confirmation!=='RESTORE COMPANY'||operation.payload.expectedRevision!==head.revision)throw new CloudConflict('تغيرت بيانات الشركة؛ أعد اختيار النسخة ومراجعة الاستعادة');
+     const restored=structuredClone(operation.payload.snapshot) as BusinessSnapshot;
+     restored.audit=(restored.audit||[]).filter(r=>{const d=JSON.parse(r.detail);return !d.account&&!d.accountId;}).map(r=>{const d=JSON.parse(r.detail);delete d.actor;return {...r,detail:JSON.stringify(d)};});
+     installBusiness(store,restored);store.settings();store.employees();store.actor=user.id;store.audit('استعادة نسخة احتياطية سحابية',{});result=true;
     }else result=applyCloudCommand(store,operation,user);
     const snapshot=captureBusiness(store);
     // Receipts keep a compact acknowledgement, never a complete payroll report.

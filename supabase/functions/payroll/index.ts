@@ -1,6 +1,8 @@
 import {createClient} from 'npm:@supabase/supabase-js@2.117.2';
 import initSqlJs from 'npm:sql.js@1.14.2';
-import {Store,CloudServer,CloudConflict,SqlJsAdapter} from './domain.js';
+import {scryptSync,timingSafeEqual} from 'node:crypto';
+import {Buffer} from 'node:buffer';
+import {Store,CloudServer,CloudConflict,SqlJsAdapter,installBusiness} from './domain.js';
 
 const url=Deno.env.get('SUPABASE_URL')!;
 const service=createClient(url,Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,{auth:{persistSession:false,autoRefreshToken:false}});
@@ -23,7 +25,14 @@ Deno.serve(async req=>{
    // Always hit Auth, including unknown usernames, to use Auth's password rate
    // limiting and avoid returning a membership-existence response.
    const auth=createClient(url,Deno.env.get('SUPABASE_ANON_KEY')!,{auth:{persistSession:false,autoRefreshToken:false}});
-   const {data,error}=await auth.auth.signInWithPassword({email:member?.login_email||`unknown@${workspace}.invalid`,password:body.password});
+   let {data,error}=await auth.auth.signInWithPassword({email:member?.login_email||`unknown@${workspace}.invalid`,password:body.password});
+   if(error&&error.status!==429&&member?.active){
+    const legacy=await checked(service.from('kayan_legacy_passwords').select('salt,hash').eq('user_id',member.id).maybeSingle());
+    if(legacy&&timingSafeEqual(scryptSync(body.password,legacy.salt,64),Buffer.from(legacy.hash,'hex'))){
+     const consumed=await checked(service.from('kayan_legacy_passwords').delete().eq('user_id',member.id).select('user_id'));
+     if(consumed.length){const changed=await service.auth.admin.updateUserById(member.id,{password:body.password});if(changed.error)throw fail('تعذر نقل كلمة المرور؛ اطلب من المدير إعادة تعيينها',503);({data,error}=await auth.auth.signInWithPassword({email:member.login_email,password:body.password}));}
+    }
+   }
    if(error||!member?.active||data.user?.id!==member.id)throw fail('بيانات الدخول غير صحيحة أو الحساب متوقف',401);
    return reply({session:data.session,user:safeUser(member)});
   }
@@ -54,7 +63,7 @@ Deno.serve(async req=>{
    try{
     const {data,error}=await service.rpc('kayan_save_member',{p_workspace:workspace,p_actor:user.id,p_id:id,p_value:{username:v.username,name:v.name.trim(),role:v.role,active:v.active,is_hidden:v.is_hidden??old?.is_hidden??false,login_email:email},p_expected:old?.version??0});
     if(error)throw fail('تعذر حفظ الحساب؛ تحقق من الاسم والصلاحيات وحدّث القائمة',409);
-    if(old&&v.password){const {error}=await service.auth.admin.updateUserById(id,{password:v.password});if(error)throw fail('حُفظت بيانات الحساب لكن تعذر تغيير كلمة المرور؛ أعد المحاولة',503);}
+    if(old&&v.password){await checked(service.from('kayan_legacy_passwords').delete().eq('user_id',id));const {error}=await service.auth.admin.updateUserById(id,{password:v.password});if(error)throw fail('حُفظت بيانات الحساب لكن تعذر تغيير كلمة المرور؛ أعد المحاولة',503);}
     return reply(safeUser(data));
    }catch(e){if(!old)await service.auth.admin.deleteUser(id);throw e;}
   }
@@ -62,7 +71,7 @@ Deno.serve(async req=>{
    const v=body.value;if(typeof v?.password!=='string'||v.password.length<8||v.password.length>200)throw fail('كلمة المرور 8 أحرف على الأقل');
    const auth=createClient(url,Deno.env.get('SUPABASE_ANON_KEY')!,{auth:{persistSession:false,autoRefreshToken:false}});
    const {error}=await auth.auth.signInWithPassword({email:member.login_email,password:v.currentPassword});if(error)throw fail('كلمة المرور الحالية غير صحيحة',401);
-   const {error:updateError}=await service.auth.admin.updateUserById(user.id,{password:v.password});if(updateError)throw fail('تعذر تغيير كلمة المرور',503);return reply(true);
+   await checked(service.from('kayan_legacy_passwords').delete().eq('user_id',user.id));const {error:updateError}=await service.auth.admin.updateUserById(user.id,{password:v.password});if(updateError)throw fail('تعذر تغيير كلمة المرور',503);return reply(true);
   }
   const repository={
    load:async(since?:number)=>{if(since!==undefined){const head=await checked(service.from('kayan_workspaces').select('revision').eq('id',workspace).single());if(head.revision===since)return {...head,snapshot:null};}return await checked(service.from('kayan_workspaces').select('revision,snapshot').eq('id',workspace).single());},
@@ -74,6 +83,11 @@ Deno.serve(async req=>{
    }
   };
   const server=new CloudServer(repository,()=>new Store(':memory:',new SqlJsAdapter(new SQL.Database())));
+  if(body.action==='reset.preview'){
+   if(user.role==='operator')throw fail('هذه العملية متاحة للأدمن فقط',403);
+   const head=await repository.load();const store=new Store(':memory:',new SqlJsAdapter(new SQL.Database()));
+   try{if(head.snapshot)installBusiness(store,head.snapshot);return reply(store.resetPreview(body.month));}finally{store.close();}
+  }
   if(body.action==='pull')return reply(await server.pull(user,Number(body.since??-1)));
   if(body.action==='execute'){
    const op=body.operation;

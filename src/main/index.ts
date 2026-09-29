@@ -40,8 +40,8 @@ async function handle(method:string,payload:any):Promise<any>{
   if(method==='cloud.sync'){await sync?.sync();return sync?.status();}
   if(maintenance)throw Error('إعادة الضبط جارية؛ انتظر اكتمال العملية');
   if(cloud&&sync&&method==='auth.status')return {configured:true,unlocked:!!sync.user,user:sync.user,cloud:true};
-  if(cloud&&sync&&(method==='auth.login'||method==='auth.setup')){const user=await cloud.login(payload.username,payload.password);sync.setUser(user);await sync.sync();if(!sync.status().online){sync.user=null;throw Error('تعذر تحميل بيانات الشركة؛ تحقق من الاتصال');}stopWatch?.();stopWatch=cloud.watch(()=>{void sync?.sync();void checkUpdates();});return user;}
-  if(cloud&&sync&&method==='auth.lock'){sync.user=null;stopWatch?.();stopWatch=null;await cloud.logout();return true;}
+  if(cloud&&sync&&(method==='auth.login'||method==='auth.setup')){const user=await cloud.login(payload.username,payload.password);sync.setUser(user);await sync.sync();if(!sync.status().online){sync.clearUser();throw Error('تعذر تحميل بيانات الشركة؛ تحقق من الاتصال');}stopWatch?.();stopWatch=cloud.watch(()=>{void sync?.sync();void checkUpdates();});return user;}
+  if(cloud&&sync&&method==='auth.lock'){sync.clearUser();stopWatch?.();stopWatch=null;await cloud.logout();return true;}
   if(method==='auth.status')return {configured:accounts.configured(),unlocked:!!accounts.current(accountId),user:accounts.current(accountId)};
   if(method==='auth.setup'||method==='auth.login'){const account=method==='auth.setup'?accounts.setup(payload):accounts.login(payload);accountId=account.id;unlocked=true;return account;}
   if(method==='auth.lock'){accountId=null;unlocked=false;return true;}const current=cloud?sync?.user:accounts.current(accountId);if(!current){accountId=null;unlocked=false;throw Error('سجّل الدخول أولًا');}
@@ -49,9 +49,20 @@ async function handle(method:string,payload:any):Promise<any>{
   store.actor=current.username;
   if(cloud&&sync){
    if(method==='admin.accounts')return cloud.call('accounts');
+   if(method==='admin.reset.preview')return cloud.call('reset.preview',{month:payload?.month});
    if(method==='admin.account.save')return cloud.call('account.save',{value:payload});
    if(method==='account.password')return cloud.call('password',{value:payload});
-   if(method==='backup.restore')throw Error('استعادة ملف محلي فوق مساحة مشتركة غير مسموحة؛ استخدم استعادة سحابية مُراجعة');
+   if(method==='backup.restore'){
+    await sync.sync();if(!sync.status().online||sync.status().pending)throw Error('تحتاج الاستعادة اتصالًا ومزامنة مكتملة');
+    const expectedRevision=sync.revision;
+    const pick=await dialog.showOpenDialog(win,{filters:[{name:'نسخة كيان',extensions:['sqlite']}],properties:['openFile']});if(pick.canceled)return false;
+    const file=pick.filePaths[0];if(path.resolve(file).toLowerCase()===path.resolve(dbPath).toLowerCase())throw Error('اختر نسخة احتياطية مختلفة');
+    const check=new Database(file,{readonly:true,fileMustExist:true});try{if(check.pragma('integrity_check',{simple:true})!=='ok'||![1,2,3].includes(Number(check.pragma('user_version',{simple:true})))||(check.pragma('foreign_key_check') as any[]).length)throw Error('نسخة غير صالحة');}finally{check.close();}
+    const staging=path.join(dataDir,'backups',`restore-review-${randomUUID()}.sqlite`);copyFileSync(file,staging);
+    let snapshot;const candidate=new Store(staging);try{snapshot=captureBusiness(candidate);}finally{candidate.close();}
+    const answer=await dialog.showMessageBox(win,{type:'warning',buttons:['إلغاء','استعادة بيانات الشركة'],defaultId:0,cancelId:0,message:'ستُستبدل بيانات الشركة على جميع الأجهزة بهذه النسخة.',detail:`تحتوي النسخة على ${snapshot.employees.length} موظف و${snapshot.periods.length} شهر. ستُحفظ نسخة من الوضع الحالي. حسابات الدخول وصلاحياتها ستظل كما هي.`});if(answer.response!==1)return false;
+    await autoBackup('before-cloud-restore');await sync.write('backup.restore',{snapshot,expectedRevision,confirmation:'RESTORE COMPANY'});return true;
+   }
    if(method==='cloud.seed'){
     if(current.role!=='super_admin')throw Error('هذه العملية متاحة للسوبر أدمن فقط');
     const local=new Store(path.join(dataDir,'payroll.sqlite'));
@@ -145,7 +156,7 @@ app.whenReady().then(async()=>{
   await win.loadFile(path.join(root,'dist/renderer/index.html'));
   // Auto-updater (silent, via GitHub Releases)
   checkUpdates=setupAutoUpdater(win,()=>!maintenance&&activeRequests===0&&!(sync?.status().pending)).check;
-  // Remote control panel (silent, via GitHub Gist)
+  // Reconcile missed realtime notifications after reconnect.
   if(sync){sync.onChanged=()=>{if(!win.isDestroyed())win.webContents.send('cloud:changed',sync!.status());};setInterval(()=>{void sync?.sync();},60_000);}
 }).catch(e=>{dialog.showErrorBox('تعذر تشغيل نظام الرواتب',e.message);app.quit();});
 app.on('window-all-closed',()=>{store?.close();app.quit();});

@@ -12,7 +12,7 @@ export interface CloudTransport {
 }
 export class SyncEngine {
  private tail:Promise<unknown>=Promise.resolve();
- private online=false;private forcePull=true;private lastSync:string|null=null;private message='جاهز للمزامنة';
+ private online=false;private forcePull=true;private generation=0;private lastSync:string|null=null;private message='جاهز للمزامنة';
  user:CloudUser|null=null;
  onChanged:()=>void=()=>{};
  constructor(readonly store:Store,private transport:CloudTransport){
@@ -23,30 +23,33 @@ export class SyncEngine {
  private set(key:string,value:string){this.store.db.prepare('INSERT INTO cloud_meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key,value);}
  get revision(){return Number(this.get('revision')||-1);}
  private rows(){return this.store.db.prepare('SELECT * FROM cloud_outbox ORDER BY seq').all() as any[];}
- status():CloudStatus{const rows=this.rows(),first=rows.find(r=>r.error);return {configured:true,online:this.online,pending:rows.length,lastSync:this.lastSync,message:this.message,revision:this.revision,conflict:first?{id:first.id,method:JSON.parse(first.operation).method,payload:JSON.parse(first.operation).payload,message:first.error}:null};}
+ status():CloudStatus{const rows=this.rows(),first=this.user?rows.find(r=>r.error):null;return {configured:true,online:this.online,pending:rows.length,lastSync:this.lastSync,message:this.message,revision:this.revision,conflict:first?{id:first.id,method:JSON.parse(first.operation).method,payload:JSON.parse(first.operation).payload,message:first.error}:null};}
  private exclusive<T>(fn:()=>Promise<T>):Promise<T>{const next=this.tail.then(fn,fn);this.tail=next.catch(()=>{});return next;}
- setUser(user:CloudUser){const pending=this.rows();if(pending.some(r=>JSON.parse(r.operation).actor!==user.id))throw Error('على هذا الجهاز عمليات لحساب آخر لم تتزامن؛ سجّل بحساب صاحبها أولًا');this.user=user;}
+ setUser(user:CloudUser){const pending=this.rows();if(pending.some(r=>JSON.parse(r.operation).actor!==user.id))throw Error('على هذا الجهاز عمليات لحساب آخر لم تتزامن؛ سجّل بحساب صاحبها أولًا');this.generation++;this.forcePull=true;this.user=user;}
+ clearUser(){this.generation++;this.forcePull=true;this.user=null;this.online=false;}
  sync(){return this.exclusive(()=>this.flush());}
  private async flush(){
   if(!this.user)return;
+  const generation=this.generation;
   try{
-   this.user=await this.transport.me();this.online=true;
+   const current=await this.transport.me();if(generation!==this.generation)return;this.user=current;this.online=true;
    if(!this.user.active)throw new CloudTransportError('الحساب متوقف',403);
    const pending=this.rows();
    for(const row of pending){
     if(row.error){this.message='يوجد تعارض يحتاج مراجعة';return;}
     const operation:CloudOperation=JSON.parse(row.operation);
     if(operation.actor!==this.user.id)throw new CloudTransportError('عمليات غير متزامنة تخص حسابًا آخر',403);
-    try{await this.transport.execute(operation);this.store.db.prepare('DELETE FROM cloud_outbox WHERE id=?').run(row.id);}
+    try{await this.transport.execute(operation);if(generation!==this.generation)return;this.store.db.prepare('DELETE FROM cloud_outbox WHERE id=?').run(row.id);}
     catch(e){if(e instanceof CloudTransportError&&[400,409,422].includes(e.status)){this.store.db.prepare('UPDATE cloud_outbox SET error=? WHERE id=?').run(e.message,row.id);this.message='يوجد تعارض يحتاج مراجعة';return;}throw e;}
    }
    // Pull even at the same revision after a user/permission change: account
    // visibility can change without a payroll mutation.
    const result=await this.transport.pull(this.forcePull?-1:this.revision);
+   if(generation!==this.generation)return;
    if(result.initialized&&result.snapshot){this.store.db.transaction(()=>{installBusiness(this.store,result.snapshot!);this.set('revision',String(result.revision));})();}
    else if(!result.initialized){this.message='المساحة فارغة؛ ارفع بيانات الجهاز الرئيسي';return;}
    this.forcePull=false;this.lastSync=new Date().toISOString();this.message='البيانات متزامنة';
-  }catch(e){this.online=false;this.message=e instanceof CloudTransportError&&e.status?e.message:'لا يوجد اتصال بالخدمة؛ التعديلات المحلية محفوظة';if(e instanceof CloudTransportError&&[401,403].includes(e.status))this.user=null;}
+  }catch(e){if(generation!==this.generation)return;this.online=false;this.message=e instanceof CloudTransportError&&e.status?e.message:'لا يوجد اتصال بالخدمة؛ التعديلات المحلية محفوظة';if(e instanceof CloudTransportError&&[401,403].includes(e.status))this.clearUser();}
   finally{this.onChanged();}
  }
  write(method:string,payload:any){return this.exclusive(async()=>{

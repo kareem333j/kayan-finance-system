@@ -2,6 +2,7 @@ import {createClient,type SupabaseClient} from '@supabase/supabase-js';
 import {safeStorage} from 'electron';
 import {existsSync,readFileSync,writeFileSync,renameSync,unlinkSync} from 'node:fs';
 import path from 'node:path';
+import {createHash} from 'node:crypto';
 import {z} from 'zod';
 import type {CloudConfig,CloudOperation,CloudUser} from '../shared/cloud';
 import {CloudTransportError,type CloudTransport} from './sync-engine';
@@ -14,11 +15,11 @@ export function writeCloudConfig(dataDir:string,value:unknown){const config=conf
 export class CloudClient implements CloudTransport {
  readonly client:SupabaseClient;
  constructor(readonly config:CloudConfig,dataDir:string){
-  const filename=path.join(dataDir,`cloud-session-${config.workspaceId}.bin`);
+  const filenameFor=(key:string)=>path.join(dataDir,`cloud-session-${config.workspaceId}-${createHash('sha256').update(key).digest('hex').slice(0,24)}.bin`);
   const storage={
-   getItem:(_key:string)=>{try{return existsSync(filename)&&safeStorage.isEncryptionAvailable()?safeStorage.decryptString(readFileSync(filename)):null;}catch{return null;}},
-   setItem:(_key:string,value:string)=>{if(!safeStorage.isEncryptionAvailable())throw Error('تعذر حماية جلسة الدخول على هذا الجهاز');writeFileSync(filename+'.tmp',safeStorage.encryptString(value));renameSync(filename+'.tmp',filename);},
-   removeItem:()=>{if(existsSync(filename))unlinkSync(filename);}
+   getItem:(key:string)=>{const filename=filenameFor(key);try{return existsSync(filename)&&safeStorage.isEncryptionAvailable()?safeStorage.decryptString(readFileSync(filename)):null;}catch{return null;}},
+   setItem:(key:string,value:string)=>{const filename=filenameFor(key);if(!safeStorage.isEncryptionAvailable())throw Error('تعذر حماية جلسة الدخول على هذا الجهاز');writeFileSync(filename+'.tmp',safeStorage.encryptString(value));renameSync(filename+'.tmp',filename);},
+   removeItem:(key:string)=>{const filename=filenameFor(key);if(existsSync(filename))unlinkSync(filename);}
   };
   this.client=createClient(config.url,config.publishableKey,{auth:{storage,persistSession:true,autoRefreshToken:true,detectSessionInUrl:false},global:{fetch:(input,init)=>fetch(input,{...init,signal:AbortSignal.timeout(25_000)})}});
  }

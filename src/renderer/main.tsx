@@ -816,7 +816,7 @@ function App() {
       <div style={{position: 'absolute', bottom: '40px', color: '#94a3b8', fontSize: '12px', zIndex: 1, display: 'flex', alignItems: 'center', gap: '16px', fontWeight: 500}}>
         <span>جميع الحقوق محفوظة © كيان {new Date().getFullYear()}</span>
         <div style={{width: '4px', height: '4px', borderRadius: '50%', background: '#475569'}}></div>
-        <span style={{display: 'flex', alignItems: 'center', gap: '8px'}}><div style={{width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', boxShadow: '0 0 12px #10b981'}}></div> متصل محلياً</span>
+        <span style={{display: 'flex', alignItems: 'center', gap: '8px'}}><div style={{width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', boxShadow: '0 0 12px #10b981'}}></div> {cloudStatus?.configured?'جاهز للاتصال بالشركة':'متصل محلياً'}</span>
       </div>
       {toast}
       {globalOverlays}
@@ -846,7 +846,7 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="local-status"><span/> يعمل محليًا <small>{auth.user?.name} · {isAdmin?'أدمن':'حساب عادي'}</small></div>
+          <div className="local-status"><span/> {cloudStatus?.configured?(cloudStatus.online?'متصل بالشركة':'تعديلات محفوظة على الجهاز'):'يعمل محليًا'} <small>{auth.user?.name} · {auth.user?.role==='super_admin'?'سوبر أدمن':isAdmin?'أدمن':'حساب عادي'}</small></div>
           <button className="lock-button" onClick={() => run(async () => {
             await api.call('auth.lock');
             setAuth({ configured: true, unlocked: false });
@@ -872,7 +872,7 @@ function App() {
           <div className="topbar-right">
             <span className="today">{new Date().toLocaleDateString('ar-EG', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
             <div className="avatar">ك</div>
-            <div><b>{state.settings.company}</b><small>إدارة محلية</small></div>
+            <div><b>{state.settings.company}</b><small>{cloudStatus?.configured?'مساحة الشركة المشتركة':'إدارة محلية'}</small></div>
           </div>
         </header>
 
@@ -1152,7 +1152,7 @@ function App() {
                   <Icon name="download"/>حفظ نسخة احتياطية
                 </button>
                 {isAdmin&&<button className="secondary full" disabled={busy} onClick={() => run(async () => {
-                  if (await api.call('backup.restore')) { setAuth({ configured: true, unlocked: false }); setState(null); setPeriod(null); notify('تم الاسترجاع؛ ادخل بكلمة مرور النسخة'); }
+                  if (await api.call('backup.restore')) { if(cloudStatus?.configured){await refresh();setPeriod(null);notify('تمت استعادة بيانات الشركة مع الاحتفاظ بحسابات الدخول.');}else{setAuth({ configured: true, unlocked: false });setState(null);setPeriod(null);notify('تم الاسترجاع؛ ادخل بكلمة مرور النسخة');} }
                 })}>
                   استعادة نسخة سابقة
                 </button>}
@@ -1196,7 +1196,7 @@ function App() {
 
           <footer className="app-footer">
             <span>كيان · إدارة الرواتب</span>
-            <span>محلي وآمن الوصول · {state.employees.length} سجل موظف</span>
+            <span>{cloudStatus?.configured?'بيانات الشركة المشتركة':'محلي وآمن الوصول'} · {state.employees.length} سجل موظف</span>
           </footer>
         </div>
       </main>
