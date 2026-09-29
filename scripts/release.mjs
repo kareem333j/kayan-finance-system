@@ -30,6 +30,7 @@ if(!resume){
  run('npx',['electron-builder','--win','nsis','--publish','never']);
 }
 if(process.env.KAYAN_ADMIN_PASSWORD){process.env.KAYAN_PACKAGED_TEST='release/win-unpacked/Kayan Payroll.exe';run('node',['scripts/cloud-ui-smoke.mjs']);}
+run('node',['scripts/check-icon.mjs']);
 const releases=await github('/releases');const matching=releases.filter(r=>r.tag_name==='v'+version||r.tag_name===version);
 if(matching.some(r=>!r.draft))throw Error('This version is already published; create a higher version.');
 let release=matching.sort((a,b)=>b.assets.length-a.assets.length)[0];

@@ -60,6 +60,7 @@ export type ImportRow = {
   row: number; name: string; code: string; job: string; costCenter: string;
   startDate: string; bankNote: string; graduation: string;
   warnings: string[]; suggested: boolean; duplicate: boolean;
+  employee?: Partial<Employee>; matchId?: string; matchVersion?: number;
 };
 export type ImportPreview = { token: string; filename: string; rows: ImportRow[] };
 

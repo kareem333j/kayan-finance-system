@@ -201,6 +201,15 @@ export class Store {
   importRows(fingerprint:string,rows:ImportRow[]) {return this.db.transaction(()=>{
     let count=0;
     for(const r of rows){if(this.db.prepare('SELECT 1 FROM imports WHERE fingerprint=? AND source_row=?').get(fingerprint,r.row)) continue;
+      if(r.duplicate)continue;
+      if(r.employee){
+        const old=r.matchId?this.employees().find(e=>e.id===r.matchId):undefined;
+        if(r.matchId&&(!old||old.version!==r.matchVersion))throw Error('تغير سجل الموظف؛ أعد معاينة الاستيراد');
+        const {id:ignoredId,version:ignoredVersion,deletedAt:ignoredDeleted,...fields}=r.employee;
+        const e=this.saveEmployee({name:r.name,paymentMethod:'غير محدد',basic:'',active:true,...old,...fields,code:fields.code||old?.code||`EMP-${this.newId().slice(0,8)}`,...(old?{id:old.id,version:r.matchVersion}:{})});
+        if(old)this.refreshSnapshots(e.id);
+        this.db.prepare('INSERT INTO imports VALUES (?,?,?)').run(fingerprint,r.row,e.id);count++;continue;
+      }
       let code=r.code && /^\d+$/.test(r.code)?`EMP-${r.code}`:`EMP-${String(r.row).padStart(4,'0')}`;
       if(this.db.prepare('SELECT 1 FROM employees WHERE code=?').get(code)) code=`${code}-${this.newId().slice(0,6)}`;
       const e=this.saveEmployee({code,name:r.name,job:r.job,costCenter:r.costCenter,startDate:r.startDate,endDate:'',paymentMethod:'غير محدد',bankNote:r.bankNote,graduation:r.graduation,phone:'',nationalId:'',address:'',basic:'',active:true,notes:`استيراد صف ${r.row}. ${r.warnings.join('، ')}`});

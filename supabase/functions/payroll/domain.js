@@ -22398,6 +22398,17 @@ var Store = class {
       let count = 0;
       for (const r of rows) {
         if (this.db.prepare("SELECT 1 FROM imports WHERE fingerprint=? AND source_row=?").get(fingerprint, r.row)) continue;
+        if (r.duplicate) continue;
+        if (r.employee) {
+          const old = r.matchId ? this.employees().find((e3) => e3.id === r.matchId) : void 0;
+          if (r.matchId && (!old || old.version !== r.matchVersion)) throw Error("\u062A\u063A\u064A\u0631 \u0633\u062C\u0644 \u0627\u0644\u0645\u0648\u0638\u0641\u061B \u0623\u0639\u062F \u0645\u0639\u0627\u064A\u0646\u0629 \u0627\u0644\u0627\u0633\u062A\u064A\u0631\u0627\u062F");
+          const { id: ignoredId, version: ignoredVersion, deletedAt: ignoredDeleted, ...fields } = r.employee;
+          const e2 = this.saveEmployee({ name: r.name, paymentMethod: "\u063A\u064A\u0631 \u0645\u062D\u062F\u062F", basic: "", active: true, ...old, ...fields, code: fields.code || old?.code || `EMP-${this.newId().slice(0, 8)}`, ...old ? { id: old.id, version: r.matchVersion } : {} });
+          if (old) this.refreshSnapshots(e2.id);
+          this.db.prepare("INSERT INTO imports VALUES (?,?,?)").run(fingerprint, r.row, e2.id);
+          count++;
+          continue;
+        }
         let code = r.code && /^\d+$/.test(r.code) ? `EMP-${r.code}` : `EMP-${String(r.row).padStart(4, "0")}`;
         if (this.db.prepare("SELECT 1 FROM employees WHERE code=?").get(code)) code = `${code}-${this.newId().slice(0, 6)}`;
         const e = this.saveEmployee({ code, name: r.name, job: r.job, costCenter: r.costCenter, startDate: r.startDate, endDate: "", paymentMethod: "\u063A\u064A\u0631 \u0645\u062D\u062F\u062F", bankNote: r.bankNote, graduation: r.graduation, phone: "", nationalId: "", address: "", basic: "", active: true, notes: `\u0627\u0633\u062A\u064A\u0631\u0627\u062F \u0635\u0641 ${r.row}. ${r.warnings.join("\u060C ")}` });

@@ -1,6 +1,6 @@
 {
   "name": "kayan-payroll",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "type": "module",
   "description": "نظام كيان لإدارة الرواتب — تطبيق محلي",
@@ -40,7 +40,7 @@
     "win": {
       "target": "nsis",
       "icon": "assets/brand/icon.ico",
-      "signAndEditExecutable": false
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": false,

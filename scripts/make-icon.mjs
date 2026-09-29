@@ -11,7 +11,7 @@ async function makeIcon() {
 
     // Convert SVG to PNG
     await sharp(inputPath)
-      .resize(256, 256)
+      .resize(256, 256, {fit:'contain',background:'#ffffff'})
       .png()
       .toFile(pngPath);
 
@@ -22,6 +22,7 @@ async function makeIcon() {
     console.log('Icon successfully created at', icoPath);
   } catch (err) {
     console.error('Error generating icon:', err);
+    process.exitCode=1;
   }
 }
 

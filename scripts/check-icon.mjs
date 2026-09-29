@@ -1,0 +1,10 @@
+import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {NtExecutable,NtExecutableResource,Resource,Data} from 'resedit';
+const executable=NtExecutable.from(readFileSync('release/win-unpacked/Kayan Payroll.exe'));
+const entries=NtExecutableResource.from(executable).entries;
+const groups=Resource.IconGroupEntry.fromEntries(entries);
+const hash=item=>createHash('sha256').update(Buffer.from(item.generate?item.generate():item.bin)).digest('hex');
+const expected=Data.IconFile.from(readFileSync('assets/brand/icon.ico')).icons.map(i=>hash(i.data));
+if(!groups.some(group=>{const actual=group.getIconItemsFromEntries(entries).map(hash);return expected.every(h=>actual.includes(h));}))throw Error('Packaged executable is missing the company icon');
+console.log('PASS packaged Windows executable contains the company icon at every supplied size');

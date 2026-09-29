@@ -1152,7 +1152,7 @@ function App() {
                   <Icon name="download"/>حفظ نسخة احتياطية
                 </button>
                 {isAdmin&&<button className="secondary full" disabled={busy} onClick={() => run(async () => {
-                  if (await api.call('backup.restore')) { if(cloudStatus?.configured){await refresh();setPeriod(null);notify('تمت استعادة بيانات الشركة مع الاحتفاظ بحسابات الدخول.');}else{setAuth({ configured: true, unlocked: false });setState(null);setPeriod(null);notify('تم الاسترجاع؛ ادخل بكلمة مرور النسخة');} }
+                  if (await api.call('backup.restore')) { await refresh();setPeriod(null);notify('تمت استعادة بيانات العمل مع الاحتفاظ بحسابات الدخول الحالية.'); }
                 })}>
                   استعادة نسخة سابقة
                 </button>}

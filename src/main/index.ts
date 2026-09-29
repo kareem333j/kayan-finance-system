@@ -14,7 +14,8 @@ import { setupAutoUpdater } from './updater';
 import {CloudClient,readCloudConfig,writeCloudConfig} from './cloud-client';
 import {SyncEngine} from './sync-engine';
 import {cloudWrites} from '../shared/cloud';
-import {captureBusiness} from './business-snapshot';
+import {captureBusiness,installBusiness} from './business-snapshot';
+import {readCompatibleBackup} from './backup-compat';
 import {randomUUID} from 'node:crypto';
 let win:BrowserWindow;let store:Store;let unlocked=false;let accountId:string|null=null;let maintenance=false;let preview:Awaited<ReturnType<typeof previewImport>>|null=null;
 const root=path.join(__dirname,'../..');
@@ -57,9 +58,8 @@ async function handle(method:string,payload:any):Promise<any>{
     const expectedRevision=sync.revision;
     const pick=await dialog.showOpenDialog(win,{filters:[{name:'نسخة كيان',extensions:['sqlite']}],properties:['openFile']});if(pick.canceled)return false;
     const file=pick.filePaths[0];if(path.resolve(file).toLowerCase()===path.resolve(dbPath).toLowerCase())throw Error('اختر نسخة احتياطية مختلفة');
-    const check=new Database(file,{readonly:true,fileMustExist:true});try{if(check.pragma('integrity_check',{simple:true})!=='ok'||![1,2,3].includes(Number(check.pragma('user_version',{simple:true})))||(check.pragma('foreign_key_check') as any[]).length)throw Error('نسخة غير صالحة');}finally{check.close();}
-    const staging=path.join(dataDir,'backups',`restore-review-${randomUUID()}.sqlite`);copyFileSync(file,staging);
-    let snapshot;const candidate=new Store(staging);try{snapshot=captureBusiness(candidate);}finally{candidate.close();}
+    const staging=path.join(dataDir,'backups',`restore-review-${randomUUID()}.sqlite`);
+    const snapshot=await readCompatibleBackup(file,staging);
     const answer=await dialog.showMessageBox(win,{type:'warning',buttons:['إلغاء','استعادة بيانات الشركة'],defaultId:0,cancelId:0,message:'ستُستبدل بيانات الشركة على جميع الأجهزة بهذه النسخة.',detail:`تحتوي النسخة على ${snapshot.employees.length} موظف و${snapshot.periods.length} شهر. ستُحفظ نسخة من الوضع الحالي. حسابات الدخول وصلاحياتها ستظل كما هي.`});if(answer.response!==1)return false;
     await autoBackup('before-cloud-restore');await sync.write('backup.restore',{snapshot,expectedRevision,confirmation:'RESTORE COMPANY'});return true;
    }
@@ -134,10 +134,11 @@ async function handle(method:string,payload:any):Promise<any>{
     case 'backup.restore':{
       const pick=await dialog.showOpenDialog(win,{filters:[{name:'نسخة كيان',extensions:['sqlite']}],properties:['openFile']});if(pick.canceled)return false;const file=pick.filePaths[0];
       if(path.resolve(file).toLowerCase()===path.resolve(dbPath).toLowerCase())throw new Error('هذه قاعدة البيانات الحالية وليست نسخة للاسترجاع');
-      const check=new Database(file,{readonly:true,fileMustExist:true});try{if(check.pragma('integrity_check',{simple:true})!=='ok'||![1,2,3].includes(Number(check.pragma('user_version',{simple:true})))||(check.pragma('foreign_key_check') as any[]).length)throw new Error('نسخة غير صالحة أو إصدار غير متوافق');for(const table of ['employees','periods','entries','settings','audit','imports',...(Number(check.pragma('user_version',{simple:true}))>=2?['daily_records','input_history','policy_history']:[])])check.prepare(`SELECT COUNT(*) FROM ${table}`).get();const savedAccounts=check.prepare('SELECT value FROM settings WHERE key=?').pluck().get('accounts');if(savedAccounts){const accounts=z.array(z.object({id:z.string(),username:z.string(),name:z.string(),role:z.enum(['super_admin','admin','operator']),active:z.boolean(),salt:z.string().regex(/^[a-f0-9]{48}$/),hash:z.string().regex(/^[a-f0-9]{128}$/)})).parse(JSON.parse(String(savedAccounts)));if(!accounts.some(a=>a.active&&['admin','super_admin'].includes(a.role))||new Set(accounts.map(a=>a.id)).size!==accounts.length||new Set(accounts.map(a=>a.username.toLowerCase())).size!==accounts.length)throw Error('حسابات النسخة غير صالحة');}const record=check.prepare('SELECT value FROM settings WHERE key=?').pluck().get('auth');if(!record)throw new Error('النسخة لا تحتوي حماية دخول');const credentials=JSON.parse(String(record));if(!/^[a-f0-9]{128}$/.test(credentials.hash)||!/^[a-f0-9]{48}$/.test(credentials.salt))throw new Error('بيانات حماية النسخة غير صحيحة');}finally{check.close();}
-      const answer=await dialog.showMessageBox(win,{type:'warning',buttons:['إلغاء','استعادة النسخة'],defaultId:0,cancelId:0,message:'ستُستبدل البيانات الحالية ببيانات النسخة المختارة.',detail:'ستُحفظ نسخة من الوضع الحالي تلقائيًا. بعد الاستعادة ستحتاج كلمة مرور النسخة المستعادة.'});if(answer.response!==1)return false;
-      const rollback=await autoBackup('before-restore');const staging=dbPath+'.restore';copyFileSync(file,staging);store.db.pragma('wal_checkpoint(TRUNCATE)');store.close();
-      try{renameSync(staging,dbPath);store=new Store(dbPath);store.settings();store.employees();store.audit('استعادة نسخة احتياطية',{});}catch(e){try{store.close();}catch{}copyFileSync(rollback,dbPath);store=new Store(dbPath);if(existsSync(staging))unlinkSync(staging);throw new Error('تعذر الاسترجاع؛ احتفظنا بالبيانات الأصلية');}unlocked=false;accountId=null;return true;
+      const staging=path.join(dataDir,'backups',`restore-review-${randomUUID()}.sqlite`);
+      const snapshot=await readCompatibleBackup(file,staging);
+      const answer=await dialog.showMessageBox(win,{type:'warning',buttons:['إلغاء','استعادة النسخة'],defaultId:0,cancelId:0,message:'ستُستبدل بيانات العمل بالنسخة المختارة.',detail:'ستُحفظ نسخة من الوضع الحالي تلقائيًا. حسابات الدخول الحالية وصلاحياتها ستبقى كما هي.'});if(answer.response!==1)return false;
+      await autoBackup('before-restore');
+      store.db.transaction(()=>{installBusiness(store,snapshot);store.audit('استعادة نسخة احتياطية',{});})();preview=null;return true;
     }
     default:throw new Error('عملية غير معروفة');
   }
@@ -145,13 +146,14 @@ async function handle(method:string,payload:any):Promise<any>{
 if(!app.requestSingleInstanceLock()){app.quit();}else{
 app.on('second-instance',()=>{if(win){if(win.isMinimized())win.restore();win.focus();}});
 app.whenReady().then(async()=>{
+  app.setAppUserModelId('com.kayan.payroll');
   mkdirSync(dataDir,{recursive:true});mkdirSync(path.join(dataDir,'backups'),{recursive:true});
   const embedded=path.join(root,'dist','cloud-config.json');if(!readCloudConfig(dataDir)&&existsSync(embedded))writeCloudConfig(dataDir,JSON.parse(readFileSync(embedded,'utf8')));
   const config=readCloudConfig(dataDir);if(config){dbPath=path.join(dataDir,'cloud-'+config.workspaceId+'.sqlite');cloud=new CloudClient(config,dataDir);}
   store=new Store(dbPath);if(cloud)sync=new SyncEngine(store,cloud);
   const day=new Date().toISOString().slice(0,10);const daily=path.join(dataDir,'backups',`daily-${day}.sqlite`);if(!existsSync(daily)){mkdirSync(path.dirname(daily),{recursive:true});await store.backup(daily);}
   const pkg=JSON.parse(readFileSync(path.join(root,'package.json'),'utf8'));
-  win=new BrowserWindow({width:1440,height:950,minWidth:1050,minHeight:720,show:!process.env.KAYAN_TEST_DATA,backgroundColor:'#f5f6f8',title:`كيان | إدارة الرواتب — الإصدار ${pkg.version}`,icon:path.join(root,'assets/brand/icon.jpeg'),autoHideMenuBar:true,webPreferences:{preload:path.join(__dirname,'preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false}});restricted(win);
+  win=new BrowserWindow({width:1440,height:950,minWidth:1050,minHeight:720,show:!process.env.KAYAN_TEST_DATA,backgroundColor:'#f5f6f8',title:`كيان | إدارة الرواتب — الإصدار ${pkg.version}`,icon:path.join(root,'assets/brand/icon.ico'),autoHideMenuBar:true,webPreferences:{preload:path.join(__dirname,'preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false}});restricted(win);
   ipcMain.handle('payroll',async(event,method,payload)=>{activeRequests++;try{if(event.sender!==win.webContents||event.senderFrame!==win.webContents.mainFrame)throw new Error('مصدر غير مصرح');return {ok:true,data:await handle(method,payload)};}catch(e:any){return {ok:false,error:e?.name==='ZodError'?'راجع الحقول المطلوبة وصيغة البيانات':e.message||'تعذر إكمال العملية'};}finally{activeRequests--;}});
   await win.loadFile(path.join(root,'dist/renderer/index.html'));
   // Auto-updater (silent, via GitHub Releases)
