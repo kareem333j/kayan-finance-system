@@ -1,4 +1,4 @@
-import {CloudConnect,CloudPanel} from './CloudPanel';
+
 import type {CloudStatus} from '../shared/cloud';
 import React, { useState, useEffect, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -688,7 +688,6 @@ function App() {
   }, []);
 
   useEffect(()=>{api.call('cloud.status').then(setCloudStatus);return api.onAppEvent('cloud:changed',(status)=>{setCloudStatus(status);if(auth?.unlocked){api.call('auth.status').then(setAuth);api.call('state').then(setState).catch(()=>{});if(period&&!editEntry&&!employee&&!bulk)api.call('period.get',period.id).then(setPeriod).catch(()=>{});}});},[auth?.unlocked,period?.id,editEntry,employee,bulk]);
-  useEffect(()=>{const online=()=>{void api.call('cloud.sync');void api.checkUpdate();};window.addEventListener('online',online);return ()=>window.removeEventListener('online',online);},[]);
   useEffect(()=>{api.updateActivity(!auth?.unlocked||busy||!!employee||!!editEntry||newMonth||!!imported||bulk||!!confirm||page!=='dashboard');},[auth?.unlocked,busy,employee,editEntry,newMonth,imported,bulk,confirm,page]);
   const signIn = () => run(async () => {
     const user=await api.call(auth?.configured ? 'auth.login' : 'auth.setup', auth?.configured?{username,password}:password);
@@ -1135,7 +1134,6 @@ function App() {
           </>}
 
           {/* ─────────── Settings ─────────── */}
-          {page === 'admin' && isAdmin && <CloudPanel superAdmin={isSuperAdmin} onChanged={refresh}/>}
           {page === 'admin' && isAdmin && <AdminPanel isSuperAdmin={isSuperAdmin} state={state} onChanged={async()=>{const next=await refresh();setSelected([]);setEditEntry(null);if(period&&next.periods.some(p=>p.id===period.id))await openPeriod(period.id);else setPeriod(null);}}/>}
           {page === 'settings' && <>
             <div className="settings-grid">
