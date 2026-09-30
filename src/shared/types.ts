@@ -4,7 +4,9 @@ export type DailyRecord={id:string;requestId:string;employeeId:string;date:strin
 export type DailyTotals=Record<DailyKind,string>;
 export const dailyLabels:Record<DailyKind,string>={absence:'غياب بالأيام',delay:'خصم بالساعات',deduction:'خصم بمبلغ',incentive:'حافز',living:'أيام إعاشة',transport:'مواصلات',other:'استحقاق آخر',advance:'سلفة مخصومة',assignment:'تكليف بمبلغ'};
 
+export const employeeCompanies = ['الشروق','المهندس للمقاولات والتوريدات العامة'] as const;
 export type Employee = {
+  employerCompany?: '' | typeof employeeCompanies[number];
   deletedAt?:string; id: string; code: string; name: string; job: string; costCenter: string;
   startDate: string; endDate: string; paymentMethod: string; bankNote: string;
   graduation: string; phone: string; nationalId: string; address: string;

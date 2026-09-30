@@ -1,3 +1,4 @@
+import {employeeCompanies} from '../shared/types';
 
 import type {CloudStatus} from '../shared/cloud';
 import React, { useState, useEffect, useMemo } from 'react';
@@ -136,7 +137,7 @@ function Toolbar({ search, setSearch, center, setCenter, centers, count }: {
   );
 }
 
-const employeeFields = [['code','الكود'],['name','الاسم الكامل'],['job','الوظيفة'],['costCenter','مركز التكلفة'],['department','الإدارة'],['startDate','تاريخ التعيين'],['endDate','تاريخ انتهاء العمل'],['contractType','نوع التعاقد'],['contractEnd','انتهاء العقد'],['birthDate','تاريخ الميلاد'],['gender','النوع'],['maritalStatus','الحالة الاجتماعية'],['nationality','الجنسية'],['nationalId','الرقم القومي'],['phone','الهاتف'],['email','البريد الإلكتروني'],['address','العنوان'],['emergencyName','جهة اتصال الطوارئ'],['emergencyPhone','هاتف الطوارئ'],['qualification','المؤهل'],['graduation','دفعة التخرج'],['insuranceNumber','الرقم التأميني'],['paymentMethod','طريقة الدفع'],['bankName','البنك'],['accountNumber','رقم الحساب'],['accountHolder','صاحب الحساب'],['walletNumber','رقم المحفظة'],['instapayAddress','عنوان إنستا باي'],['bankNote','ملاحظات البنك'],['notes','الملاحظات']];
+const employeeFields = [['code','الكود'],['name','الاسم الكامل'],['employerCompany','الشركة التابع لها الموظف'],['job','الوظيفة'],['costCenter','مركز التكلفة'],['department','الإدارة'],['startDate','تاريخ التعيين'],['endDate','تاريخ انتهاء العمل'],['contractType','نوع التعاقد'],['contractEnd','انتهاء العقد'],['birthDate','تاريخ الميلاد'],['gender','النوع'],['maritalStatus','الحالة الاجتماعية'],['nationality','الجنسية'],['nationalId','الرقم القومي'],['phone','الهاتف'],['email','البريد الإلكتروني'],['address','العنوان'],['emergencyName','جهة اتصال الطوارئ'],['emergencyPhone','هاتف الطوارئ'],['qualification','المؤهل'],['graduation','دفعة التخرج'],['insuranceNumber','الرقم التأميني'],['paymentMethod','طريقة الدفع'],['bankName','البنك'],['accountNumber','رقم الحساب'],['accountHolder','صاحب الحساب'],['walletNumber','رقم المحفظة'],['instapayAddress','عنوان إنستا باي'],['bankNote','ملاحظات البنك'],['notes','الملاحظات']];
 
 function EmployeeExportModal({ employees, onClose, onExport, busy }: { employees: Employee[], onClose: () => void, onExport: (format: string, fields: string[], includeSalary: boolean) => void, busy: boolean }) {
   const [fields, setFields] = useState<string[]>(employeeFields.map(f => f[0]));
@@ -195,6 +196,12 @@ function EmployeeForm({ employee, busy, onClose, save, remove, onExport }: {
           <div className="form-grid three-cols">
             {field('name', 'الاسم الكامل')}
             {field('code', 'كود الموظف')}
+            <Field label="الشركة التابع لها الموظف">
+              <select required value={v.employerCompany||''} onChange={e=>setV({...v,employerCompany:e.target.value as Employee['employerCompany']})}>
+                <option value="" disabled>اختر الشركة</option>
+                {employeeCompanies.map(company=><option key={company} value={company}>{company}</option>)}
+              </select>
+            </Field>
             {field('job', 'الوظيفة')}
             {field('costCenter', 'مركز التكلفة / المشروع')}
             {field('basic', 'الراتب الأساسي — جنيه')}
