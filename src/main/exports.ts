@@ -1,21 +1,510 @@
 import ExcelJS from 'exceljs';
-import type { Period, ExportOptions, Entry, Settings, RegisterColumn } from '../shared/types';
+import type { Period, ExportOptions, Entry, Settings, RegisterColumn, MonthlyReportColumn, MonthlyReportSection } from '../shared/types';
 import { labels, earningKeys, deductionKeys, money, type AmountKey } from '../domain/payroll';
+import { dailyLabels, type DailyKind } from '../shared/types';
 
 export const escapeHtml = (v: unknown) =>
   String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
 export function selectedEntries(p: Period, opts: ExportOptions): Entry[] {
   const ids = new Set(opts.entryIds);
-  const rows = p.entries.filter(e => ids.has(e.id));
+  const rows = p.entries.filter(e => ids.has(e.id)).map(e => {
+    if (e.result) return e;
+    return {
+      ...e,
+      error:e.error||'بيانات الحساب غير مكتملة',
+      result: {
+        amounts: { basic:0, assignment:0, overtime:0, incentive:0, living:0, transport:0, other:0, advance:0, absence:0, doubleAbsence:0, delay:0, fellowship:0, penalties:0, timePenalty:0, dailyDeduction:0 },
+        customAmounts: {},
+        gross: 0, deductions: 0, net: 0, explanations: {}, version: ''
+      }
+    };
+  }) as Entry[];
   if (!rows.length) throw new Error('اختر موظفًا واحدًا على الأقل');
-  if (rows.some(e => !e.result)) throw new Error('أكمل البيانات المالية قبل التصدير');
   return rows;
+}
+
+const DEFAULT_REPORT_SECTIONS: MonthlyReportSection[] = ['overview','quality','centers','payment','components','daily','employees'];
+const DEFAULT_REPORT_COLUMNS: MonthlyReportColumn[] = ['code','name','employerCompany','job','department','costCenter','paymentMethod','basic','gross','deductions','net','checked','paid'];
+const REPORT_COLUMN_LABELS: Record<MonthlyReportColumn,string> = {
+  code:'الكود', name:'اسم الموظف', employerCompany:'الشركة', job:'الوظيفة', department:'الإدارة',
+  costCenter:'مركز التكلفة', paymentMethod:'طريقة الدفع', basic:'الأساسي', gross:'إجمالي الاستحقاقات',
+  deductions:'إجمالي الاستقطاعات', net:'صافي المستحق', checked:'المراجعة', paid:'الصرف'
+};
+
+function monthlyReportData(p:Period, rows:Entry[]) {
+  const sum=(key:'gross'|'deductions'|'net')=>rows.reduce((total,e)=>total+(e.result?.[key]||0),0);
+  const group=(key:'costCenter'|'paymentMethod'|'employerCompany')=>{
+    const values=new Map<string,{name:string;count:number;gross:number;deductions:number;net:number}>();
+    for(const e of rows){const name=String(e.snapshot[key]||'غير محدد');const item=values.get(name)||{name,count:0,gross:0,deductions:0,net:0};item.count++;item.gross+=e.result?.gross||0;item.deductions+=e.result?.deductions||0;item.net+=e.result?.net||0;values.set(name,item);}
+    return [...values.values()].sort((a,b)=>b.net-a.net);
+  };
+  const components=[
+    ...earningKeys.map(key=>({key,name:labels[key],type:'استحقاق',amount:rows.reduce((n,e)=>n+(e.result?.amounts[key]||0),0)})),
+    ...deductionKeys.map(key=>({key,name:labels[key],type:'استقطاع',amount:rows.reduce((n,e)=>n+(e.result?.amounts[key]||0),0)})),
+    ...(p.policy?.formulas.customFields||[]).map(f=>({key:f.id,name:f.name,type:f.type==='earning'?'استحقاق':'استقطاع',amount:rows.reduce((n,e)=>n+(e.result?.customAmounts?.[f.id]||0),0)}))
+  ].filter(item=>item.amount!==0).sort((a,b)=>b.amount-a.amount);
+  const daily=(Object.keys(dailyLabels) as DailyKind[]).map(key=>({key,name:dailyLabels[key],quantity:rows.reduce((n,e)=>n+Number(e.daily?.[key]||0),0)})).filter(item=>item.quantity!==0);
+  const gross=sum('gross'), deductions=sum('deductions'), net=sum('net');
+  return {
+    gross,deductions,net,
+    averages:{net:rows.length?Math.round(net/rows.length):0},
+    counts:{employees:rows.length,reviewed:rows.filter(e=>e.checked&&!e.error&&!!e.result&&e.result.net>=0).length,pending:rows.filter(e=>!e.checked||!!e.error||!e.result||(e.result?.net||0)<0).length,incomplete:rows.filter(e=>!!e.error||!e.result).length,paid:rows.filter(e=>e.paid).length,unpaid:rows.filter(e=>!e.paid).length},
+    centers:group('costCenter'), payment:group('paymentMethod'), companies:group('employerCompany'), components, daily
+  };
+}
+
+function monthlyReportHtml(p:Period,opts:ExportOptions,logo:string,font:string,rows:Entry[]) {
+  const esc=escapeHtml, data=monthlyReportData(p,rows), selected=new Set(opts.reportSections||DEFAULT_REPORT_SECTIONS);
+  const company=esc(p.policy?.company||'كيان');
+  const monthAr=new Date(`${p.month}-01T12:00:00`).toLocaleDateString('ar-EG',{month:'long',year:'numeric'});
+  const accent=opts.monochrome?'#475569':'#EC671B', navy='#1C2A38', border='#E2E8F0';
+  const isApproved = p.status === 'approved';
+
+  const chart=(id:string,title:string,items:Array<{name:string;value:number;label:string}>)=>{
+    if(!items.length)return `<div class="empty-chart">لا توجد بيانات كافية لعرض الرسم البياني</div>`;
+    const max=Math.max(...items.map(x=>Math.abs(x.value)),1);
+    const total=items.reduce((s,x)=>s+Math.abs(x.value),0);
+    const height=66+items.length*46;
+    const gradients = opts.monochrome ? `
+      <linearGradient id="cGrad0_${id}" x1="1" y1="0" x2="0" y2="0"><stop offset="0%" stop-color="#475569"/><stop offset="100%" stop-color="#64748B"/></linearGradient>
+      <linearGradient id="cGrad1_${id}" x1="1" y1="0" x2="0" y2="0"><stop offset="0%" stop-color="#334155"/><stop offset="100%" stop-color="#475569"/></linearGradient>
+      <linearGradient id="cGrad2_${id}" x1="1" y1="0" x2="0" y2="0"><stop offset="0%" stop-color="#64748B"/><stop offset="100%" stop-color="#94A3B8"/></linearGradient>
+    ` : `
+      <linearGradient id="cGrad0_${id}" x1="1" y1="0" x2="0" y2="0"><stop offset="0%" stop-color="#EC671B"/><stop offset="100%" stop-color="#FB923C"/></linearGradient>
+      <linearGradient id="cGrad1_${id}" x1="1" y1="0" x2="0" y2="0"><stop offset="0%" stop-color="#1C2A38"/><stop offset="100%" stop-color="#334E68"/></linearGradient>
+      <linearGradient id="cGrad2_${id}" x1="1" y1="0" x2="0" y2="0"><stop offset="0%" stop-color="#0D9488"/><stop offset="100%" stop-color="#2DD4BF"/></linearGradient>
+      <linearGradient id="cGrad3_${id}" x1="1" y1="0" x2="0" y2="0"><stop offset="0%" stop-color="#7C3AED"/><stop offset="100%" stop-color="#A78BFA"/></linearGradient>
+      <linearGradient id="cGrad4_${id}" x1="1" y1="0" x2="0" y2="0"><stop offset="0%" stop-color="#D97706"/><stop offset="100%" stop-color="#FBBF24"/></linearGradient>
+      <linearGradient id="cGrad5_${id}" x1="1" y1="0" x2="0" y2="0"><stop offset="0%" stop-color="#E11D48"/><stop offset="100%" stop-color="#FB7185"/></linearGradient>
+    `;
+
+    return `<svg class="report-chart" data-report-chart="${esc(id)}" viewBox="0 0 960 ${height}" role="img" aria-label="${esc(title)}">
+      <defs>
+        ${gradients}
+      </defs>
+      <rect x="946" y="16" width="5" height="24" rx="2.5" fill="${accent}"/>
+      <text x="932" y="34" text-anchor="start" direction="rtl" class="chart-title">${esc(title)}</text>
+      <text x="25" y="34" text-anchor="end" direction="rtl" class="chart-subtitle">${items.length} تصنيفات${total>0&&id!=='payment'?` · الإجمالي: ${money(total)} جنيه`:''}</text>
+      ${items.map((item,i)=>{
+        const y=58+i*46;
+        const barW=Math.max(8,Math.round((Math.abs(item.value)/max)*400));
+        const pct=total>0?Math.round((Math.abs(item.value)/total)*100):0;
+        const gradName=opts.monochrome?`cGrad${i%3}_${id}`:`cGrad${i%6}_${id}`;
+        const displayName=item.name.length>38?item.name.slice(0,37)+'…':item.name;
+        return `
+        <g class="chart-row">
+          <rect x="18" y="${y}" width="924" height="38" rx="7" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="0.8"/>
+          <text x="922" y="${y+24}" text-anchor="start" direction="rtl" class="chart-label">${esc(displayName)}</text>
+          <rect x="255" y="${y+13}" width="400" height="12" rx="6" fill="#EDF2F7"/>
+          <rect x="${255+400-barW}" y="${y+13}" width="${barW}" height="12" rx="6" fill="url(#${gradName})"/>
+          <rect x="198" y="${y+10}" width="46" height="19" rx="9.5" fill="#EEF2F6"/>
+          <text x="221" y="${y+23}" text-anchor="middle" direction="ltr" class="chart-pct">${pct}%</text>
+          <text x="32" y="${y+24}" text-anchor="start" direction="ltr" class="chart-value">${esc(item.label)}</text>
+        </g>`;
+      }).join('')}
+    </svg>`;
+  };
+
+  const colKeys=(opts.reportColumns?.length?opts.reportColumns:DEFAULT_REPORT_COLUMNS).filter((key,index,list)=>Object.hasOwn(REPORT_COLUMN_LABELS,key)&&list.indexOf(key)===index);
+  const employeeCell=(e:Entry,key:MonthlyReportColumn)=>{
+    if(key==='gross'||key==='deductions'||key==='net')return money(e.result?.[key]||0);
+    if(key==='basic')return money(e.result?.amounts.basic||0);
+    if(key==='checked')return e.checked&&!e.error&&!!e.result&&e.result.net>=0?'تمت المراجعة':'بانتظار المراجعة';
+    if(key==='paid')return e.paid?'تم الصرف':'لم يُصرف';
+    return String((e.snapshot as any)[key]||'—');
+  };
+
+  const section=(title:string,content:string)=>`<section class="report-section"><h2>${esc(title)}</h2>${content}</section>`;
+
+  const header=`<header class="report-header">
+    <div class="header-brand">
+      <img class="report-logo" src="${esc(logo)}" alt="شعار الشركة">
+      <div class="brand-details">
+        <h1>${company}</h1>
+        <span class="report-title-label">التقرير الشهري للرواتب — الإدارة المالية</span>
+      </div>
+    </div>
+    <div class="header-center">
+      <div class="period-pill">
+        <span class="period-label">عن مسير شهر</span>
+        <strong class="period-name">${esc(monthAr)}</strong>
+      </div>
+    </div>
+    <div class="header-meta">
+      <div class="status-stamp ${isApproved?'approved':'draft'}">
+        ${isApproved?'✓ نسخة رسمية معتمدة':'⚠ مسودة غير معتمدة'}
+      </div>
+      <div class="meta-details">
+        <span>كود المرجع: <code>${esc(p.id.slice(0,8))}</code></span>
+        <span>النطاق: <b>${rows.length}</b> موظف</span>
+        <span>تاريخ الإصدار: ${new Date().toLocaleDateString('ar-EG')}</span>
+      </div>
+    </div>
+  </header>`;
+
+  const overview=selected.has('overview')?section('الملخص التنفيذي',`
+    <div class="kpis">
+      <div class="kpi">
+        <div class="kpi-top"><span>إجمالي الاستحقاقات</span><span class="kpi-dot orange"></span></div>
+        <strong class="kpi-val">${money(data.gross)}</strong>
+        <small>جنيه مصري · الرواتب والبدلات</small>
+      </div>
+      <div class="kpi">
+        <div class="kpi-top"><span>إجمالي الاستقطاعات</span><span class="kpi-dot slate"></span></div>
+        <strong class="kpi-val">${money(data.deductions)}</strong>
+        <small>جنيه مصري · الخصومات والسلف</small>
+      </div>
+      <div class="kpi highlight">
+        <div class="kpi-top"><span>صافي المستحق للصرف</span><span class="kpi-badge">صافي الواجب سداده</span></div>
+        <strong class="kpi-val net">${money(data.net)}</strong>
+        <small>جنيه مصري · إجمالي الصرف</small>
+      </div>
+      <div class="kpi">
+        <div class="kpi-top"><span>متوسط الصافي للموظف</span></div>
+        <strong class="kpi-val">${money(data.averages.net)}</strong>
+        <small>لكل موظف ضمن نطاق التقرير</small>
+      </div>
+      <div class="kpi">
+        <div class="kpi-top"><span>إجمالي عدد الموظفين</span></div>
+        <strong class="kpi-val count">${String(data.counts.employees)}</strong>
+        <small>موظف وعامل مسجلين بالمسير</small>
+      </div>
+      <div class="kpi ${isApproved?'approved-card':'draft-card'}">
+        <div class="kpi-top"><span>حالة اعتماد المسير</span></div>
+        <strong class="kpi-val status">${isApproved?'معتمد رسمياً':'مسودة غير معتمدة'}</strong>
+        <small>${p.approvedAt?`اعتمد بتاريخ ${p.approvedAt.slice(0,10)}`:'غير معتمد بعد'}</small>
+      </div>
+    </div>
+  `):'';
+
+  const quality=selected.has('quality')?section('المراجعة والصرف',`
+    <div class="quality-grid">
+      <div class="quality-card q-reviewed">
+        <div class="q-icon">✓</div>
+        <div class="q-body">
+          <span class="q-label">تمت مراجعته</span>
+          <strong class="q-num">${data.counts.reviewed}</strong>
+          <small class="q-sub">جاهز للصرف</small>
+        </div>
+      </div>
+      <div class="quality-card q-pending">
+        <div class="q-icon">⏱</div>
+        <div class="q-body">
+          <span class="q-label">بانتظار المراجعة</span>
+          <strong class="q-num">${data.counts.pending}</strong>
+          <small class="q-sub">تحت التدقيق</small>
+        </div>
+      </div>
+      <div class="quality-card q-incomplete">
+        <div class="q-icon">⚠</div>
+        <div class="q-body">
+          <span class="q-label">بيانات ناقصة</span>
+          <strong class="q-num">${data.counts.incomplete}</strong>
+          <small class="q-sub">تتطلب استكمالاً</small>
+        </div>
+      </div>
+      <div class="quality-card q-paid">
+        <div class="q-icon">💳</div>
+        <div class="q-body">
+          <span class="q-label">تم الصرف</span>
+          <strong class="q-num">${data.counts.paid}</strong>
+          <small class="q-sub">تم تحويل مستحقاتهم</small>
+        </div>
+      </div>
+      <div class="quality-card q-unpaid">
+        <div class="q-icon">⏳</div>
+        <div class="q-body">
+          <span class="q-label">لم يُصرف بعد</span>
+          <strong class="q-num">${data.counts.unpaid}</strong>
+          <small class="q-sub">في انتظار الصرف</small>
+        </div>
+      </div>
+    </div>
+  `):'';
+
+  const centers=selected.has('centers')?section('التوزيع حسب مركز التكلفة',`
+    ${chart('centers','صافي المستحق حسب مركز التكلفة',data.centers.slice(0,12).map(x=>({name:x.name,value:x.net,label:money(x.net)})))}
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th style="width:28%">مركز التكلفة</th>
+          <th style="width:12%">عدد الموظفين</th>
+          <th style="width:18%">إجمالي الاستحقاقات</th>
+          <th style="width:18%">إجمالي الاستقطاعات</th>
+          <th style="width:18%">صافي المستحق</th>
+          <th style="width:6%">النسبة</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${data.centers.map(x=>{
+          const pct=data.net>0?((x.net/data.net)*100).toFixed(1):'0';
+          return `<tr>
+            <td><strong>${esc(x.name)}</strong></td>
+            <td class="num">${x.count}</td>
+            <td class="num">${money(x.gross)}</td>
+            <td class="num">${money(x.deductions)}</td>
+            <td class="num strong-net">${money(x.net)}</td>
+            <td class="num muted">${pct}%</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+      <tfoot>
+        <tr class="table-total-row">
+          <td><strong>الإجمالي (${data.centers.length} مركز)</strong></td>
+          <td class="num"><strong>${data.counts.employees}</strong></td>
+          <td class="num"><strong>${money(data.gross)}</strong></td>
+          <td class="num"><strong>${money(data.deductions)}</strong></td>
+          <td class="num highlight-net"><strong>${money(data.net)}</strong></td>
+          <td class="num"><strong>100%</strong></td>
+        </tr>
+      </tfoot>
+    </table>
+    <h3 class="subsection-title">التوزيع حسب الشركة التابعة</h3>
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th style="width:40%">الشركة</th>
+          <th style="width:15%">عدد الموظفين</th>
+          <th style="width:30%">صافي المستحق</th>
+          <th style="width:15%">النسبة</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${data.companies.map(x=>{
+          const pct=data.net>0?((x.net/data.net)*100).toFixed(1):'0';
+          return `<tr>
+            <td><strong>${esc(x.name)}</strong></td>
+            <td class="num">${x.count}</td>
+            <td class="num strong-net">${money(x.net)}</td>
+            <td class="num muted">${pct}%</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+      <tfoot>
+        <tr class="table-total-row">
+          <td><strong>الإجمالي</strong></td>
+          <td class="num"><strong>${data.counts.employees}</strong></td>
+          <td class="num highlight-net"><strong>${money(data.net)}</strong></td>
+          <td class="num"><strong>100%</strong></td>
+        </tr>
+      </tfoot>
+    </table>
+  `):'';
+
+  const payment=selected.has('payment')?section('التوزيع حسب طريقة الدفع',`
+    ${chart('payment','عدد الموظفين حسب طريقة الدفع',data.payment.map(x=>({name:x.name,value:x.count,label:`${x.count} موظف`})))}
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th style="width:40%">طريقة الدفع / الصرف</th>
+          <th style="width:15%">عدد الموظفين</th>
+          <th style="width:30%">صافي المستحق</th>
+          <th style="width:15%">نسبة الموظفين</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${data.payment.map(x=>{
+          const pct=data.counts.employees>0?((x.count/data.counts.employees)*100).toFixed(1):'0';
+          return `<tr>
+            <td><strong>${esc(x.name)}</strong></td>
+            <td class="num">${x.count}</td>
+            <td class="num strong-net">${money(x.net)}</td>
+            <td class="num muted">${pct}%</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+      <tfoot>
+        <tr class="table-total-row">
+          <td><strong>الإجمالي</strong></td>
+          <td class="num"><strong>${data.counts.employees}</strong></td>
+          <td class="num highlight-net"><strong>${money(data.net)}</strong></td>
+          <td class="num"><strong>100%</strong></td>
+        </tr>
+      </tfoot>
+    </table>
+  `):'';
+
+  const components=selected.has('components')?section('تفصيل بنود الرواتب',`
+    ${chart('components','أعلى بنود الاستحقاق والاستقطاع',data.components.slice(0,12).map(x=>({name:`${x.name} · ${x.type}`,value:x.amount,label:money(x.amount)})))}
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th style="width:50%">بند الراتب</th>
+          <th style="width:20%">نوع البند</th>
+          <th style="width:30%">إجمالي المبلغ</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${data.components.map(x=>`<tr>
+          <td><strong>${esc(x.name)}</strong></td>
+          <td><span class="type-pill ${x.type==='استحقاق'?'earn':'ded'}">${esc(x.type)}</span></td>
+          <td class="num ${x.type==='استحقاق'?'num-earn':'num-ded'}">${money(x.amount)}</td>
+        </tr>`).join('')}
+      </tbody>
+      <tfoot>
+        <tr class="table-total-row">
+          <td colspan="2"><strong>صافي المسير (الاستحقاقات − الاستقطاعات)</strong></td>
+          <td class="num highlight-net"><strong>${money(data.net)}</strong></td>
+        </tr>
+      </tfoot>
+    </table>
+  `):'';
+
+  const daily=selected.has('daily')?section('ملخص الحركات اليومية',data.daily.length?`
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th style="width:60%">نوع الحركة اليومية</th>
+          <th style="width:40%">الكمية المسجلة</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${data.daily.map(x=>`<tr>
+          <td><strong>${esc(x.name)}</strong></td>
+          <td class="num">${esc(x.quantity.toLocaleString('ar-EG'))}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+  `:'<p class="muted-box">لا توجد حركات يومية مسجلة في هذا المسير.</p>'):'';
+
+  const employees=selected.has('employees')?section('تفاصيل الموظفين',`
+    <table class="report-table employee-table">
+      <thead>
+        <tr>${colKeys.map(k=>`<th>${esc(REPORT_COLUMN_LABELS[k])}</th>`).join('')}</tr>
+      </thead>
+      <tbody>
+        ${rows.map(e=>`<tr>${colKeys.map(k=>{
+          const isNum=['basic','gross','deductions','net'].includes(k);
+          const isStatus=k==='checked'||k==='paid';
+          const val=employeeCell(e,k);
+          if(isStatus){
+            const ok=val==='تمت المراجعة'||val==='تم الصرف';
+            return `<td><span class="status-chip ${ok?'ok':'wait'}">${esc(val)}</span></td>`;
+          }
+          return `<td class="${isNum?'num':''} ${k==='net'?'strong-net':''}">${esc(val)}</td>`;
+        }).join('')}</tr>`).join('')}
+      </tbody>
+      <tfoot>
+        <tr class="table-total-row">
+          <td><strong>إجمالي (${rows.length} موظف)</strong></td>
+          ${colKeys.slice(1).map(k=>{
+            if(k==='gross')return `<td class="num"><strong>${money(data.gross)}</strong></td>`;
+            if(k==='deductions')return `<td class="num"><strong>${money(data.deductions)}</strong></td>`;
+            if(k==='net')return `<td class="num highlight-net"><strong>${money(data.net)}</strong></td>`;
+            return `<td></td>`;
+          }).join('')}
+        </tr>
+      </tfoot>
+    </table>
+  `):'';
+
+  return `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:"><title>${company} - التقرير الشهري ${esc(p.month)}</title><style>
+  @font-face{font-family:Arabic;src:url('${font}') format('truetype')}
+  *{box-sizing:border-box}
+  @page{size:A4 landscape;margin:8mm 10mm 10mm 10mm}
+  body{margin:0 auto;width:277mm;padding:0;color:#1C2A38;background:#fff;font:11px Arabic,'Noto Sans Arabic','Segoe UI',Tahoma,Arial,sans-serif;line-height:1.55}
+  
+  /* ── Header ── */
+  .report-header{display:flex;align-items:center;justify-content:space-between;gap:20px;border-bottom:3.5px solid ${accent};padding:0 0 16px;margin-bottom:20px;break-inside:avoid}
+  .header-brand{display:flex;align-items:center;gap:16px}
+  .report-logo{width:88px;height:54px;object-fit:contain}
+  .brand-details h1{font-size:20px;font-weight:800;color:${navy};margin:0 0 3px}
+  .report-title-label{font-size:12px;color:#64748B;font-weight:500}
+  .header-center{display:flex;justify-content:center}
+  .period-pill{background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:8px 20px;text-align:center}
+  .period-label{display:block;font-size:10px;color:#94A3B8;margin-bottom:2px}
+  .period-name{font-size:16px;font-weight:800;color:${navy}}
+  .header-meta{text-align:left;display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+  .status-stamp{font-size:11px;font-weight:700;padding:5px 14px;border-radius:20px;white-space:nowrap}
+  .status-stamp.approved{background:#ECFDF5;color:#065F46;border:1px solid #A7F3D0}
+  .status-stamp.draft{background:#FFFBEB;color:#92400E;border:1px solid #FDE68A}
+  .meta-details{display:flex;gap:12px;font-size:9.5px;color:#64748B}
+  .meta-details code{font-family:Consolas,monospace;background:#F1F5F9;padding:1px 5px;border-radius:4px;font-size:9.5px}
+  
+  /* ── Sections ── */
+  .report-section{margin:0 0 22px;break-inside:avoid}
+  .report-section h2{font-size:14.5px;font-weight:800;color:${navy};margin:0 0 12px;display:flex;align-items:center;gap:8px;padding-bottom:6px;border-bottom:2px solid #E2E8F0}
+  .report-section h2::before{content:'';width:4px;height:16px;border-radius:2px;background:${accent}}
+  .subsection-title{font-size:12.5px;font-weight:700;color:${navy};margin:16px 0 8px}
+
+  /* ── KPIs ── */
+  .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .kpi{border:1px solid ${border};border-radius:10px;padding:12px 14px;background:#FAFBFC;display:flex;flex-direction:column;gap:4px;box-shadow:0 1px 2px rgba(0,0,0,0.02)}
+  .kpi.highlight{background:#FFF9F5;border:1.5px solid #FDBA74;border-top:3.5px solid ${accent}}
+  .kpi.approved-card{border-top:3px solid #059669}
+  .kpi.draft-card{border-top:3px solid #D97706}
+  .kpi-top{display:flex;justify-content:space-between;align-items:center;font-size:10px;color:#64748B;font-weight:600}
+  .kpi-dot{width:6px;height:6px;border-radius:50%}
+  .kpi-dot.orange{background:${accent}}
+  .kpi-dot.slate{background:#64748B}
+  .kpi-badge{font-size:9px;background:#FFEDD5;color:#C2410C;padding:2px 8px;border-radius:10px;font-weight:700}
+  .kpi-val{font-size:19px;font-weight:800;color:${navy};direction:ltr;text-align:right;font-variant-numeric:tabular-nums;margin:2px 0}
+  .kpi-val.net{color:#C2410C;font-size:21px}
+  .kpi-val.count{font-size:22px}
+  .kpi-val.status{font-size:15px;direction:rtl}
+  .kpi small{font-size:9px;color:#94A3B8}
+
+  /* ── Quality Grid ── */
+  .quality-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+  .quality-card{border:1px solid ${border};border-radius:9px;padding:10px 12px;display:flex;align-items:center;gap:10px;background:#FAFBFC}
+  .quality-card.q-reviewed{border-top:3px solid #059669;background:#F0FDF4}
+  .quality-card.q-pending{border-top:3px solid #D97706;background:#FFFBEB}
+  .quality-card.q-incomplete{border-top:3px solid #DC2626;background:#FEF2F2}
+  .quality-card.q-paid{border-top:3px solid #0284C7;background:#F0F9FF}
+  .quality-card.q-unpaid{border-top:3px solid #64748B;background:#F8FAFC}
+  .q-icon{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font-size:12px;flex-shrink:0;background:rgba(255,255,255,0.8);font-weight:700}
+  .q-reviewed .q-icon{color:#059669}
+  .q-pending .q-icon{color:#D97706}
+  .q-incomplete .q-icon{color:#DC2626}
+  .q-paid .q-icon{color:#0284C7}
+  .q-unpaid .q-icon{color:#64748B}
+  .q-body{display:flex;flex-direction:column}
+  .q-label{font-size:10px;color:#475569;font-weight:600}
+  .q-num{font-size:17px;font-weight:800;color:${navy};font-variant-numeric:tabular-nums;margin:1px 0}
+  .q-sub{font-size:8.5px;color:#94A3B8}
+
+  /* ── Charts ── */
+  .report-chart{width:100%;max-height:480px;margin:6px 0 14px;overflow:visible}
+  .chart-title{font:800 16px Arabic,'Segoe UI',sans-serif;fill:${navy}}
+  .chart-subtitle{font:600 11.5px Arabic,'Segoe UI',sans-serif;fill:#64748B}
+  .chart-label{font:700 12px Arabic,'Segoe UI',sans-serif;fill:#1C2A38}
+  .chart-value{font:800 12.5px Arabic,'Segoe UI',sans-serif;fill:#1C2A38;font-variant-numeric:tabular-nums}
+  .chart-pct{font:700 10.5px Arabic,'Segoe UI',sans-serif;fill:#475569}
+
+  /* ── Tables ── */
+  .report-table{width:100%;border-collapse:separate;border-spacing:0;margin:10px 0 14px;border:1px solid #E2E8F0;border-radius:8px;overflow:hidden}
+  thead{display:table-header-group}
+  th{background:${navy};color:#FFFFFF;font-weight:700;text-align:right;padding:8px 10px;font-size:9.5px;white-space:nowrap}
+  td{border-bottom:1px solid #EDF2F7;padding:7px 10px;font-size:9.5px;vertical-align:middle;color:#334155}
+  tbody tr:nth-child(even){background:#F8FAFC}
+  tbody tr:hover{background:#F1F5F9}
+  .num{direction:ltr;text-align:left;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .strong-net{font-weight:700;color:${navy}}
+  .highlight-net{color:#C2410C;font-weight:800;font-size:10.5px}
+  .table-total-row td{background:#F1F5F9;border-top:2px solid ${navy};color:${navy};font-weight:700}
+  .type-pill{display:inline-block;padding:2px 8px;border-radius:12px;font-size:9px;font-weight:700}
+  .type-pill.earn{background:#ECFDF5;color:#065F46;border:1px solid #A7F3D0}
+  .type-pill.ded{background:#FFF1F2;color:#9F1239;border:1px solid #FECDD3}
+  .num-earn{color:#065F46;font-weight:600}
+  .num-ded{color:#9F1239;font-weight:600}
+  .status-chip{display:inline-block;padding:2px 8px;border-radius:12px;font-size:8.5px;font-weight:700}
+  .status-chip.ok{background:#ECFDF5;color:#065F46}
+  .status-chip.wait{background:#FFFBEB;color:#92400E}
+  .employee-table{font-size:8.5px}
+  .employee-table th,.employee-table td{padding:5px 7px}
+  .empty-chart,.muted-box{padding:14px;background:#F8FAFC;border:1px dashed #CBD5E1;border-radius:8px;color:#94A3B8;text-align:center;font-size:10.5px}
+  
+  /* ── Footer ── */
+  .report-footer{border-top:1.5px solid #E2E8F0;padding-top:10px;margin-top:20px;color:#94A3B8;font-size:9px;display:flex;justify-content:space-between;align-items:center;break-inside:avoid}
+  .report-footer code{font-family:Consolas,monospace;background:#F1F5F9;padding:1px 4px;border-radius:3px}
+  </style></head><body>${header}${overview}${quality}${centers}${payment}${components}${daily}${employees}<footer class="report-footer"><span>نظام كيان المالي · كود التقرير <code>${esc(p.id)}</code> · شهر ${esc(p.month)}${p.approvedAt?` · اعتماد رسمي ${esc(p.approvedAt.slice(0,10))}`:''}</span><span>إصدار رسمي معتمد · تاريخ الطباعة ${new Date().toLocaleDateString('ar-EG')}</span></footer></body></html>`;
 }
 
 // ─── Professional HTML export ────────────────────────────────────────────────
 export function printHtml(p: Period, opts: ExportOptions, logo: string, font: string): string {
   const rows = selectedEntries(p, opts);
+  if(opts.template==='monthly')return monthlyReportHtml(p,opts,logo,font,rows);
   const esc = escapeHtml;
   const company = esc(p.policy?.company || 'كيان');
   const formulas = p.policy?.formulas;
@@ -128,20 +617,20 @@ export function printHtml(p: Period, opts: ExportOptions, logo: string, font: st
       page-break-inside: avoid;
     }
     ${opts.paper === 'A5' ? 'body { font-size: 13px; } .emp-cell .val.lg { font-size: 15px; } .net-box .amount { font-size: 24px; } .slip-tables { gap: 12px; } table th, table td { padding: 8px 10px; } .doc-footer { font-size: 10px; }' : ''}
-    ${opts.template === 'compact' ? 'body { font-size: 13px; } .emp-cell { padding: 10px 12px; } .slip-tables { gap: 12px; margin-bottom: 12px; } table th, table td { padding: 8px 10px; font-size: 13px; } .net-box { padding: 12px 16px; margin-bottom: 12px; } .net-box .amount { font-size: 24px; }' : ''}
+    ${opts.template === 'compact' ? 'body { font-size: 9.5px; } .compact .slip-tables { gap: 6px; margin-bottom: 4px; } .compact table th, .compact table td { padding: 2px 4px; font-size: 9px; } .compact .net-box { padding: 4px 8px; margin-bottom: 4px; } .compact .net-box .amount { font-size: 18px; }' : ''}
   
     body{width:${opts.template==='register'?(opts.paper==='A4'?'267mm':'180mm'):(opts.paper==='A4'?'180mm':'118mm')};line-height:1.6}
     ${opts.paper==='A5'?'.slip{line-height:1.35}.slip-tables{gap:8px;margin-bottom:10px}.slip table th,.slip table td,.slip tbody td.num,.slip tfoot td{font-size:10px;padding:5px 6px}.slip .note-cell{font-size:8px;margin-top:2px}.slip .emp-cell{padding:6px}.slip .emp-cell .val,.slip .emp-cell .val.lg{font-size:11px}.slip .emp-cell .lbl{font-size:8px;margin-bottom:2px}.slip .doc-header .sub small{font-size:9px}.slip .status-badge{font-size:9px;padding:4px 6px}.slip .net-box{padding:8px 12px;margin-bottom:8px}.slip .net-box .label{font-size:13px}.slip .net-box .amount{font-size:21px}.slip .note{font-size:9px;padding:6px;margin:6px 0}.slip .doc-footer{font-size:8px;padding-top:5px}':''}
-    .compact{line-height:1.4}.compact tbody td.num{font-size:11px}.compact .emp-cell .lbl{font-size:8px;margin-bottom:2px}.compact .slip>*{flex-shrink:0}.compact .signatures{font-size:9px;margin:4px 0}
+    .compact{line-height:1.3}.compact tbody td.num{font-size:9.5px}.compact .emp-cell .lbl{font-size:7.5px;margin-bottom:1px}.compact .slip>*{flex-shrink:0}.compact .signatures{font-size:8.5px;margin:3px 0}
     .signatures{display:flex;justify-content:space-between;margin:10px 0;font-size:11px}.register-wrap{min-height:0}.reg-table{table-layout:fixed}.reg-table th,.reg-table td{overflow-wrap:anywhere;font-size:10px;padding:7px 4px}.reg-table td.num{font-size:10px;white-space:normal}
     .cutoff-banner{padding:7px 10px;background:#fff0e4;margin-bottom:10px;font-size:12px;font-weight:700}
     .slip{min-height:0;break-inside:avoid}
     ${opts.paper==='A5'?'.slip{font-size:11px}.doc-header{margin-bottom:12px;padding-bottom:8px}.doc-header img{height:42px}.emp-bar{margin-bottom:10px}.doc-header .sub{font-size:14px}':''}
-    .compact .slip{height:132mm;min-height:0;padding:0 0 3mm;margin:0;break-inside:avoid;font-size:10px}
-    .compact .slip:nth-child(2n+1){margin-bottom:3mm}
-    .compact .doc-header{padding-bottom:5px;margin-bottom:7px;gap:8px}
-    .compact .doc-header img{height:35px}.compact .doc-header .sub{font-size:13px}.compact .doc-header .sub small{font-size:9px}.compact .status-badge{font-size:9px;padding:3px 8px}
-    .compact .emp-bar{margin-bottom:8px}.compact .emp-cell{padding:4px 7px}.compact .emp-cell .val,.compact .emp-cell .val.lg{font-size:11px}.compact .emp-cell .key{font-size:9px}.compact .net-box{padding:5px 10px;margin-bottom:6px}.compact .net-box .amount{font-size:19px}.compact .net-box .label{font-size:12px}.compact .note-cell{font-size:8px;margin-top:1px}.compact .doc-footer{font-size:8px;padding-top:5px}.compact .note{font-size:9px;margin:5px 0;padding:5px}.compact .month-badge{font-size:10px;margin-bottom:5px}.compact .slip-tables{margin-bottom:6px}.compact tfoot td{font-size:11px;padding:4px 6px}.compact th,.compact td{padding:3px 6px;font-size:10px}
+    .compact .slip{height:138mm;min-height:0;padding:0 0 1mm;margin:0;break-inside:avoid;font-size:9px}
+    .compact .slip:nth-child(2n+1){margin-bottom:2mm}
+    .compact .doc-header{padding-bottom:3px;margin-bottom:4px;gap:6px}
+    .compact .doc-header img{height:28px}.compact .doc-header .sub{font-size:11.5px}.compact .doc-header .sub small{font-size:8px}.compact .status-badge{font-size:8px;padding:2px 6px}
+    .compact .emp-bar{margin-bottom:4px}.compact .emp-cell{padding:2px 5px}.compact .emp-cell .val,.compact .emp-cell .val.lg{font-size:9.5px}.compact .emp-cell .key{font-size:8px}.compact .net-box{padding:3px 6px;margin-bottom:3px}.compact .net-box .amount{font-size:16px}.compact .net-box .label{font-size:10px}.compact .note-cell{font-size:7px;margin-top:1px}.compact .doc-footer{font-size:7.5px;padding-top:3px}.compact .note{font-size:8px;margin:2px 0;padding:3px}.compact .month-badge{font-size:8.5px;margin-bottom:3px}.compact .slip-tables{margin-bottom:3px;gap:6px}.compact tfoot td{font-size:9.5px;padding:2px 4px}.compact th,.compact td{padding:2px 4px;font-size:9px}
 `;
 
   const monthAr = new Date(`${p.month}-01T12:00:00`).toLocaleDateString('ar-EG', { month: 'long', year: 'numeric' });
@@ -181,10 +670,10 @@ export function printHtml(p: Period, opts: ExportOptions, logo: string, font: st
     const colLabel: Record<string, string> = {
       code: 'الكود', name: 'الاسم', job: 'الوظيفة', costCenter: 'مركز التكلفة',
       paymentMethod: 'طريقة الدفع',
-      basic: 'الأساسي', assignment: 'التكليف', incentive: 'حافز',
+      basic: 'الأساسي', assignment: 'التكليف', overtime:'أيام عمل إضافية', incentive: 'حافز',
       living: 'إعاشة', transport: 'مواصلات', other: 'أخرى',
-      advance: 'السلف', absence: 'خصم الغياب', delay: 'خصم التأخير',
-      fellowship: 'صندوق الزمالة', penalties: 'جزاءات',dailyDeduction:'خصومات يومية',
+      advance: 'السلف', absence: 'خصم الغياب', doubleAbsence:'غياب بخصم يومين', delay: 'خصم التأخير',
+      fellowship: 'صندوق الزمالة', penalties: 'جزاءات بمبلغ',timePenalty:'جزاءات بالساعات/الأيام',dailyDeduction:'خصومات يومية',
       gross: 'إجمالي الاستحقاقات', deductions: 'إجمالي الاستقطاعات',
       net: 'صافي المرتب', signature: 'التوقيع'
     };
@@ -195,7 +684,7 @@ export function printHtml(p: Period, opts: ExportOptions, logo: string, font: st
     }
 
     if(cols.some(c=>!Object.hasOwn(colLabel,c))||new Set(cols).size!==cols.length)throw new Error('أعمدة التصدير غير صالحة أو مكررة');
-    const numCols = new Set(['basic', 'assignment', 'incentive', 'living', 'transport', 'other', 'advance', 'absence', 'delay', 'fellowship', 'penalties', 'dailyDeduction', 'gross', 'deductions', 'net', ...(formulas?.customFields?.map((f: any)=>f.id) || [])]);
+    const numCols = new Set(['basic', 'assignment', 'overtime', 'incentive', 'living', 'transport', 'other', 'advance', 'absence', 'doubleAbsence', 'delay', 'fellowship', 'penalties', 'timePenalty', 'dailyDeduction', 'gross', 'deductions', 'net', ...(formulas?.customFields?.map((f: any)=>f.id) || [])]);
 
     const getCellVal = (e: Entry, col: RegisterColumn): string => {
       switch (col) {
@@ -327,7 +816,56 @@ ${show('net')?`        <div class="net-box">
 }
 
 // ─── Professional Excel export ────────────────────────────────────────────────
-export async function excelBuffer(p: Period, opts: ExportOptions, logoPng?: Buffer) {
+type ReportChartBuffers = Partial<Record<'centers'|'payment'|'components',Buffer>>;
+
+async function monthlyReportExcelBuffer(p:Period,opts:ExportOptions,logoPng?:Buffer,chartPngs:ReportChartBuffers={}) {
+  const rows=selectedEntries(p,opts),data=monthlyReportData(p,rows),sections=new Set(opts.reportSections||DEFAULT_REPORT_SECTIONS);
+  const cols=(opts.reportColumns?.length?opts.reportColumns:DEFAULT_REPORT_COLUMNS).filter((key,index,list)=>Object.hasOwn(REPORT_COLUMN_LABELS,key)&&list.indexOf(key)===index);
+  const navyArgb=opts.monochrome?'FF475569':'FF1C2A38',secondaryArgb=opts.monochrome?'FF64748B':'FF2E4259',accentArgb=opts.monochrome?'FF64748B':'FFEC671B';
+  const book=new ExcelJS.Workbook();book.creator='Kayan Payroll';book.created=new Date();
+  const company=p.policy?.company||'كيان';
+  const summary=book.addWorksheet('ملخص التقرير',{views:[{rightToLeft:true,state:'frozen',ySplit:3}],pageSetup:{paperSize:9,orientation:'landscape',fitToPage:true,fitToWidth:1,fitToHeight:0}});
+  summary.columns=Array.from({length:8},()=>({width:20}));
+  summary.mergeCells(1,1,1,8);summary.getCell('A1').value=`${company} — التقرير الشهري ${p.month}`;
+  summary.mergeCells(2,1,2,8);summary.getCell('A2').value=`${p.status==='approved'?'نسخة معتمدة':'مسودة غير معتمدة'} | ${rows.length} موظف | مرجع ${p.id.slice(0,8)} | جنيه مصري | إصدار ${new Date().toLocaleDateString('ar-EG')}`;
+  for(const [row,color,size] of [[1,navyArgb,18],[2,secondaryArgb,10]] as const){summary.getRow(row).height=row===1?38:25;summary.getRow(row).eachCell(c=>{c.font={name:'Arial',size,bold:row===1,color:{argb:'FFFFFFFF'}};c.fill={type:'pattern',pattern:'solid',fgColor:{argb:color}};c.alignment={vertical:'middle',horizontal:'right'};});}
+  if(logoPng){const id=book.addImage({buffer:logoPng as any,extension:'png'});summary.addImage(id,{tl:{col:6.6,row:0.15},ext:{width:110,height:52}});}
+  if(sections.has('overview')){
+    const cards=[['إجمالي الاستحقاقات',data.gross],['إجمالي الاستقطاعات',data.deductions],['صافي المستحق',data.net],['متوسط الصافي',data.averages.net],['الموظفون',data.counts.employees],['حالة الكشف',p.status==='approved'?'معتمد':'مسودة']];
+    cards.forEach(([label,value],i)=>{const start=1+(i%3)*2,row=4+Math.floor(i/3)*2;summary.mergeCells(row,start,row,start+1);summary.mergeCells(row+1,start,row+1,start+1);const labelCell=summary.getCell(row,start),valueCell=summary.getCell(row+1,start);labelCell.value=label;valueCell.value=typeof value==='number'&&i<4?value/100:value;labelCell.font={name:'Arial',size:10,bold:true,color:{argb:'FF475569'}};valueCell.font={name:'Arial',size:14,bold:true,color:{argb:i===2?accentArgb:navyArgb}};labelCell.alignment=valueCell.alignment={horizontal:'center',vertical:'middle'};valueCell.fill={type:'pattern',pattern:'solid',fgColor:{argb:opts.monochrome?'FFF1F5F9':'FFFFF5EB'}};valueCell.numFmt=typeof value==='number'&&i<4?'#,##0.00':'General';});
+    summary.getRow(4).height=22;summary.getRow(5).height=30;summary.getRow(6).height=22;summary.getRow(7).height=30;
+  }
+  let row=sections.has('overview')?9:4;
+  const title=(text:string)=>{summary.mergeCells(row,1,row,5);const c=summary.getCell(row,1);c.value=text;c.font={name:'Arial',size:12,bold:true,color:{argb:'FFFFFFFF'}};c.fill={type:'pattern',pattern:'solid',fgColor:{argb:navyArgb}};c.alignment={vertical:'middle',horizontal:'right'};summary.getRow(row).height=25;row++;};
+  const table=(headers:string[],values:(string|number)[][])=>{summary.addRow(headers);summary.getRow(row).height=24;summary.getRow(row).eachCell(c=>{c.font={name:'Arial',size:9,bold:true,color:{argb:'FFFFFFFF'}};c.fill={type:'pattern',pattern:'solid',fgColor:{argb:accentArgb}};c.alignment={horizontal:'right',vertical:'middle'};});row++;for(const valuesRow of values){const r=summary.addRow(valuesRow);r.eachCell(c=>{c.font={name:'Arial',size:9,color:{argb:navyArgb}};c.alignment={horizontal:'right',vertical:'middle'};if(typeof c.value==='number')c.numFmt='#,##0.00';});row++;}};
+  if(sections.has('quality')){title('حالة المراجعة والصرف');table(['تمت المراجعة','بانتظار المراجعة','بيانات ناقصة','تم الصرف','لم يُصرف'],[[data.counts.reviewed,data.counts.pending,data.counts.incomplete,data.counts.paid,data.counts.unpaid]]);row++;}
+  if(sections.has('centers')){title('ملخص مراكز التكلفة');table(['مركز التكلفة','عدد الموظفين','الاستحقاقات','الاستقطاعات','صافي المستحق'],data.centers.map(x=>[x.name,x.count,x.gross/100,x.deductions/100,x.net/100]));row++;title('ملخص الشركات');table(['الشركة','عدد الموظفين','الاستحقاقات','الاستقطاعات','صافي المستحق'],data.companies.map(x=>[x.name,x.count,x.gross/100,x.deductions/100,x.net/100]));row++;}
+  if(sections.has('payment')){title('ملخص طرق الدفع');table(['طريقة الدفع','عدد الموظفين','الاستحقاقات','الاستقطاعات','صافي المستحق'],data.payment.map(x=>[x.name,x.count,x.gross/100,x.deductions/100,x.net/100]));row++;}
+  if(sections.has('components')){title('ملخص بنود الرواتب');table(['البند','النوع','الإجمالي'],data.components.map(x=>[x.name,x.type,x.amount/100]));row++;}
+  if(sections.has('daily')){title('ملخص الحركات اليومية');table(['نوع الحركة','الكمية المسجلة'],data.daily.map(x=>[x.name,x.quantity]));row++;}
+  const chartList=[['centers',chartPngs.centers],['payment',chartPngs.payment],['components',chartPngs.components]].filter((x):x is [string,Buffer]=>!!x[1]);
+  if(chartList.length){title('الرسوم البيانية');for(const [name,buffer] of chartList){const imageId=book.addImage({buffer:buffer as any,extension:'png'});summary.addImage(imageId,{tl:{col:0.2,row:row-0.35},ext:{width:640,height:Math.min(300,Math.max(150,rows.length*18))}});row+=Math.ceil(Math.min(300,Math.max(150,rows.length*18))/18)+2;} }
+  summary.headerFooter.oddFooter=`&Rصفحة &P من &N&L${company} — ${p.month}`;
+  if(sections.has('employees')){
+    const details=book.addWorksheet('تفاصيل الموظفين',{views:[{rightToLeft:true,state:'frozen',ySplit:2}],pageSetup:{orientation:'landscape',fitToPage:true,fitToWidth:1,fitToHeight:0}});
+    details.mergeCells(1,1,1,cols.length);details.getCell(1,1).value=`${company} — تفاصيل الموظفين · ${p.month}`;
+    details.addRow(cols.map(c=>REPORT_COLUMN_LABELS[c]));
+    for(const e of rows){details.addRow(cols.map(c=>{
+      if(c==='gross'||c==='deductions'||c==='net')return (e.result?.[c]||0)/100;
+      if(c==='basic')return (e.result?.amounts.basic||0)/100;
+      if(c==='checked')return e.checked&&!e.error&&!!e.result&&e.result.net>=0?'تمت المراجعة':'بانتظار المراجعة';
+      if(c==='paid')return e.paid?'تم الصرف':'لم يُصرف';
+      return String((e.snapshot as any)[c]||'—');
+    }));}
+    details.columns=cols.map(key=>({key,width:['name','employerCompany','department','costCenter'].includes(key)?24:16}));
+    details.eachRow((r,n)=>{r.height=n===1?34:n===2?28:24;r.eachCell(c=>{c.font={name:'Arial',size:n===1?15:10,bold:n<=2,color:{argb:n<=2?'FFFFFFFF':navyArgb}};c.alignment={horizontal:'right',vertical:'middle',wrapText:true};if(n<=2)c.fill={type:'pattern',pattern:'solid',fgColor:{argb:n===1?navyArgb:accentArgb}};if(n>2&&typeof c.value==='number')c.numFmt='#,##0.00';});});
+    details.autoFilter={from:{row:2,column:1},to:{row:rows.length+2,column:cols.length}};
+  }
+  return Buffer.from(await book.xlsx.writeBuffer());
+}
+
+export async function excelBuffer(p: Period, opts: ExportOptions, logoPng?: Buffer, reportChartPngs?:ReportChartBuffers) {
+  if(opts.template==='monthly')return monthlyReportExcelBuffer(p,opts,logoPng,reportChartPngs);
   const rows = selectedEntries(p, opts);
   const book = new ExcelJS.Workbook();
   book.creator = 'Kayan Payroll';

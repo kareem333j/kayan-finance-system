@@ -13,7 +13,7 @@ export function applyCloudCommand(store:Store,operation:CloudOperation,user:Clou
  try{return store.db.transaction(()=>{
   const p=operation.payload;
   switch(operation.method){
-   case 'employee.save':{const employee=store.saveEmployee(p);store.refreshSnapshots(employee.id);return employee;}
+   case 'employee.save':return store.saveEmployee(p);
    case 'employee.delete':return store.removeEmployee(p);
    case 'period.create':return store.createPeriod(p);
    case 'period.sync':return store.syncPeriod(p);

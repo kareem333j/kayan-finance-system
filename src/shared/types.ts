@@ -1,10 +1,10 @@
 import type { Inputs, Calculation } from '../domain/payroll';
-export type DailyKind='absence'|'delay'|'deduction'|'incentive'|'living'|'transport'|'other'|'advance'|'assignment';
+export type DailyKind='absence'|'doubleAbsence'|'delay'|'deduction'|'incentive'|'living'|'transport'|'other'|'advance'|'assignment';
 export type DailyRecord={id:string;requestId:string;employeeId:string;date:string;kind:DailyKind;quantity:string;note:string;version:number;voided:boolean;createdAt:string};
 export type DailyTotals=Record<DailyKind,string>;
-export const dailyLabels:Record<DailyKind,string>={absence:'غياب بالأيام',delay:'خصم بالساعات',deduction:'خصم بمبلغ',incentive:'حافز',living:'أيام إعاشة',transport:'مواصلات',other:'استحقاق آخر',advance:'سلفة مخصومة',assignment:'تكليف بمبلغ'};
+export const dailyLabels:Record<DailyKind,string>={absence:'غياب بالأيام',doubleAbsence:'غياب بخصم يومين',delay:'خصم بالساعات',deduction:'خصم بمبلغ',incentive:'حافز',living:'أيام إعاشة',transport:'مواصلات',other:'استحقاق آخر',advance:'سلفة مخصومة',assignment:'تكليف بمبلغ'};
 
-export const employeeCompanies = ['الشروق','المهندس للمقاولات والتوريدات العامة'] as const;
+export const employeeCompanies = ['الشروق','المهندس للمقاولات والتوريدات العامة','الإدارة'] as const;
 export type Employee = {
   employerCompany?: '' | typeof employeeCompanies[number];
   deletedAt?:string; id: string; code: string; name: string; job: string; costCenter: string;
@@ -68,14 +68,18 @@ export type ImportPreview = { token: string; filename: string; rows: ImportRow[]
 
 // Columns user can toggle on/off for the register export
 export type RegisterColumn = 'code' | 'name' | 'job' | 'costCenter' | 'paymentMethod' |
-  'basic' | 'assignment' | 'incentive' | 'living' | 'transport' | 'other' |
-  'advance' | 'absence' | 'delay' | 'fellowship' | 'penalties' |
+  'basic' | 'assignment' | 'overtime' | 'incentive' | 'living' | 'transport' | 'other' |
+  'advance' | 'absence' | 'doubleAbsence' | 'delay' | 'fellowship' | 'penalties' | 'timePenalty' |
   'gross' | 'deductions' | 'net' | 'signature' | string;
+
+export type MonthlyReportSection = 'overview' | 'quality' | 'centers' | 'payment' | 'components' | 'daily' | 'employees';
+export type MonthlyReportColumn = 'code' | 'name' | 'employerCompany' | 'job' | 'department' | 'costCenter' |
+  'paymentMethod' | 'basic' | 'gross' | 'deductions' | 'net' | 'checked' | 'paid';
 
 export type ExportOptions = {
   periodId: string;
   entryIds: string[];
-  template: 'slip' | 'compact' | 'register';
+  template: 'slip' | 'compact' | 'register' | 'monthly';
   paper: 'A4' | 'A5';
   hideZeros: boolean;
   monochrome: boolean;
@@ -84,6 +88,8 @@ export type ExportOptions = {
   registerColumns?: RegisterColumn[];
   // slip fields to include
   slipFields?: string[];
+  reportSections?: MonthlyReportSection[];
+  reportColumns?: MonthlyReportColumn[];
   asOf?:string; view?:'monthly'|'accrued';
 };
 export type Api = { 

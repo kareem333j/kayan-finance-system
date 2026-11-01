@@ -9,6 +9,7 @@ import { previewImport } from './importer';
 import { employeeHtml,employeeExcel } from './employee-export';
 import { validDate } from '../domain/dates';
 import { printHtml,excelBuffer } from './exports';
+import { openPrintDocument } from './print-document';
 import type { ExportOptions } from '../shared/types';
 
 
@@ -26,14 +27,19 @@ let dbPath=path.join(dataDir,'payroll.sqlite');
 let activeRequests=0;
 let accountService:{storeRef:Store;accounts:Accounts}|null=null;
 async function autoBackup(tag:string){const dir=path.join(dataDir,'backups');mkdirSync(dir,{recursive:true});const file=path.join(dir,`${tag}-${new Date().toISOString().replace(/[:.]/g,'-')}.sqlite`);await store.backup(file);return file;}
-function validatedExport(payload:unknown):ExportOptions {const opts=z.object({periodId:z.string(),entryIds:z.array(z.string()).min(1),template:z.enum(['slip','compact','register']),paper:z.enum(['A4','A5']),hideZeros:z.boolean(),monochrome:z.boolean(),explanations:z.boolean(),registerColumns:z.array(z.string()).optional(),slipFields:z.array(z.string()).optional(),asOf:z.string().optional(),view:z.enum(['monthly','accrued']).optional()}).parse(payload);if(opts.template==='compact'&&opts.paper!=='A4')throw new Error('القسيمتان تتطلبان ورق A4');return opts as ExportOptions;}
+function validatedExport(payload:unknown):ExportOptions {const opts=z.object({periodId:z.string(),entryIds:z.array(z.string()).min(1),template:z.enum(['slip','compact','register','monthly']),paper:z.enum(['A4','A5']),hideZeros:z.boolean(),monochrome:z.boolean(),explanations:z.boolean(),registerColumns:z.array(z.string()).optional(),slipFields:z.array(z.string()).optional(),reportSections:z.array(z.enum(['overview','quality','centers','payment','components','daily','employees'])).optional(),reportColumns:z.array(z.enum(['code','name','employerCompany','job','department','costCenter','paymentMethod','basic','gross','deductions','net','checked','paid'])).optional(),asOf:z.string().optional(),view:z.enum(['monthly','accrued']).optional()}).parse(payload);if(opts.template==='compact'&&opts.paper!=='A4')throw new Error('القسيمتان تتطلبان ورق A4');if(opts.template==='monthly'&&opts.view==='accrued')throw new Error('التقرير الشهري يعرض تسوية الشهر كاملة');if(opts.template==='monthly'&&opts.reportSections&&!opts.reportSections.length)throw new Error('اختر قسمًا واحدًا على الأقل للتقرير');if(opts.template==='monthly'&&opts.reportSections?.includes('employees')&&opts.reportColumns&&!opts.reportColumns.length)throw new Error('اختر حقلًا واحدًا على الأقل لتفاصيل الموظفين');return opts as ExportOptions;}
 function restricted(w:BrowserWindow){w.webContents.setWindowOpenHandler(()=>({action:'deny'}));w.webContents.on('will-navigate',e=>e.preventDefault());}
 function exportPeriod(opts:ExportOptions){const p=store.period(opts.periodId,opts.asOf);if(opts.view==='accrued'){p.view='accrued';p.entries=p.entries.map(e=>({...e,result:e.accrued||null,error:e.accruedError,inputs:e.effectiveInputs||e.inputs}));}return p;}
 async function printWindow(opts:ExportOptions){
   const p=exportPeriod(opts);const logo='data:image/svg+xml;base64,'+readFileSync(path.join(root,'assets/brand/logo.svg')).toString('base64');
   const font='data:font/ttf;base64,'+readFileSync(path.join(root,'assets/fonts/NotoSansArabic-Regular.ttf')).toString('base64');
-  const html=printHtml(p,opts,logo,font);const w=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});restricted(w);
-  try{await w.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(html));await w.webContents.executeJavaScript('document.fonts.ready.then(()=>Promise.all(Array.from(document.images).map(i=>i.decode().catch(()=>{}))))');if(opts.template==='compact'){const overflow=await w.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.slip')).some(e=>e.scrollHeight>e.clientHeight+2)`);if(overflow)throw new Error('تفاصيل القسيمة أكثر من مساحة نصف صفحة؛ اختر القسيمة المفصلة لحفظ وضوح كل البنود');}return w;}catch(e){w.destroy();throw e;}
+  const html=printHtml(p,opts,logo,font);const w=await openPrintDocument(html);
+  try{if(opts.template==='compact'){const overflow=await w.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.slip')).some(e=>e.scrollHeight>e.clientHeight+2)`);if(overflow)throw new Error('تفاصيل القسيمة أكثر من مساحة نصف صفحة؛ اختر القسيمة المفصلة لحفظ وضوح كل البنود');}return w;}catch(e){w.destroy();throw e;}
+}
+async function exportImages(w:BrowserWindow){
+  const result=await w.webContents.executeJavaScript(`(async()=>{const toPng=async(source,width,height)=>{const image=new Image();image.src=source;await image.decode();const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;const context=canvas.getContext('2d');context.fillStyle='#fff';context.fillRect(0,0,width,height);const scale=Math.min(width/image.naturalWidth,height/image.naturalHeight);const drawWidth=image.naturalWidth*scale,drawHeight=image.naturalHeight*scale;context.drawImage(image,(width-drawWidth)/2,(height-drawHeight)/2,drawWidth,drawHeight);return canvas.toDataURL('image/png').split(',')[1]};const logo=await toPng(document.querySelector('.report-logo, .doc-header img').src,500,240);const charts={};for(const svg of document.querySelectorAll('.report-chart[data-report-chart]')){const box=svg.viewBox.baseVal;const xml=new XMLSerializer().serializeToString(svg);const encoded=btoa(unescape(encodeURIComponent(xml)));charts[svg.dataset.reportChart]=await toPng('data:image/svg+xml;base64,'+encoded,Math.ceil(box.width*2),Math.ceil(box.height*2));}return {logo,charts};})()`);
+  const charts=Object.fromEntries(Object.entries(result.charts||{}).map(([key,value])=>[key,Buffer.from(value as string,'base64')]));
+  return {logo:Buffer.from(result.logo,'base64'),charts};
 }
 async function handle(method:string,payload:any):Promise<any>{
   const accounts=accountService?.storeRef===store?accountService.accounts:(accountService={storeRef:store,accounts:new Accounts(store)}).accounts;
@@ -42,7 +48,7 @@ async function handle(method:string,payload:any):Promise<any>{
   if(method==='auth.status')return {configured:accounts.configured(),unlocked:!!accounts.current(accountId),user:accounts.current(accountId)};
   if(method==='auth.setup'||method==='auth.login'){const account=method==='auth.setup'?accounts.setup(payload):accounts.login(payload);accountId=account.id;unlocked=true;return account;}
   if(method==='auth.lock'){accountId=null;unlocked=false;return true;}const current=accounts.current(accountId);if(!current){accountId=null;unlocked=false;throw Error('سجّل الدخول أولًا');}
-  if(method.startsWith('admin.')||['settings.save','backup.restore','period.approve'].includes(method)){accounts.requireAdmin(accountId);}
+  if(method.startsWith('admin.')||['settings.save','backup.restore','period.approve','period.delete'].includes(method)){accounts.requireAdmin(accountId);}
   store.actor=current.username;
   switch(method){
     case 'account.password':return accounts.changePassword(current.id,payload);
@@ -51,7 +57,7 @@ async function handle(method:string,payload:any):Promise<any>{
     case 'admin.reset.preview':return store.resetPreview(payload?.month);
     case 'admin.reset':{accounts.verify(current.id,payload.password);const request=z.object({month:z.string().optional(),revision:z.number().int(),confirmation:z.string()}).parse(payload);const before=store.resetPreview(request.month);if(before.revision!==request.revision||before.confirmation!==request.confirmation)throw Error('تغيرت البيانات أو عبارة التأكيد غير صحيحة؛ أعد المعاينة');maintenance=true;try{const backup=await autoBackup(request.month?'before-reset-'+request.month:'before-reset-all');const result=store.resetData(request,current.username,backup);preview=null;return result;}finally{maintenance=false;}}
     case 'state':{const state=store.state();return {...state,audit:accounts.filterAudit(current.id,state.audit)};}
-    case 'employee.save':{const emp=store.saveEmployee(payload);store.refreshSnapshots(emp.id);return emp;}
+    case 'employee.save':return store.saveEmployee(payload);
     case 'employee.delete':return store.removeEmployee(payload);
     case 'period.create':return store.createPeriod(payload);
     case 'period.sync':return store.syncPeriod(payload);
@@ -73,13 +79,14 @@ async function handle(method:string,payload:any):Promise<any>{
       }
       
       let buffer:Buffer|undefined;
-      if(pdf || print){const logo='data:image/svg+xml;base64,'+readFileSync(path.join(root,'assets/brand/logo.svg')).toString('base64');const font='data:font/ttf;base64,'+readFileSync(path.join(root,'assets/fonts/NotoSansArabic-Regular.ttf')).toString('base64');const w=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});restricted(w);w.setMenuBarVisibility(false);try{await w.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(employeeHtml(employees,store.settings().company,logo,font,v.includeSalary,v.fields)));await w.webContents.executeJavaScript('document.fonts.ready');if(print){await new Promise<void>((resolve,reject)=>w.webContents.print({silent:false,printBackground:true},(ok,why)=>ok?resolve():reject(new Error(why==='cancelled'?'أُلغيت الطباعة':`لم تكتمل الطباعة: ${why}`))));return 'أُرسل إلى الطابعة';}buffer=await w.webContents.printToPDF({printBackground:true,preferCSSPageSize:true});}finally{w.destroy();}}else buffer=await employeeExcel(employees,store.settings().company,v.includeSalary,readFileSync(path.join(root,'assets/brand/export-logo.png')),v.fields);
+      if(pdf || print){const logo='data:image/svg+xml;base64,'+readFileSync(path.join(root,'assets/brand/logo.svg')).toString('base64');const font='data:font/ttf;base64,'+readFileSync(path.join(root,'assets/fonts/NotoSansArabic-Regular.ttf')).toString('base64');const w=await openPrintDocument(employeeHtml(employees,store.settings().company,logo,font,v.includeSalary,v.fields));try{if(print){await new Promise<void>((resolve,reject)=>w.webContents.print({silent:false,printBackground:true},(ok,why)=>ok?resolve():reject(new Error(why==='cancelled'?'أُلغيت الطباعة':`لم تكتمل الطباعة: ${why}`))));return 'أُرسل إلى الطابعة';}buffer=await w.webContents.printToPDF({printBackground:true,preferCSSPageSize:true});}finally{w.destroy();}}else buffer=await employeeExcel(employees,store.settings().company,v.includeSalary,readFileSync(path.join(root,'assets/brand/export-logo.png')),v.fields);
       writeFileSync(filePath+'.tmp',buffer!);renameSync(filePath+'.tmp',filePath);store.audit('تصدير ملفات موظفين',{ids:v.ids,format:ext});return filePath;
     }
     case 'entry.save':return store.saveEntry(payload);
     case 'entry.saveBatch':return store.saveEntries(payload);
     case 'settings.save':return store.setSettings(payload);
     case 'period.approve':await autoBackup('before-approval');return store.approve(payload);
+    case 'period.delete':{await autoBackup('before-period-delete');return store.deletePeriod(payload);}
     case 'period.pay':return store.pay(payload);
     case 'import.preview':{
       const picked=await dialog.showOpenDialog(win,{title:'اختيار ملف العمال',filters:[{name:'Excel',extensions:['xlsx']}],properties:['openFile']});if(picked.canceled)return null;
@@ -89,15 +96,15 @@ async function handle(method:string,payload:any):Promise<any>{
       const v=z.object({token:z.string(),rows:z.array(z.number().int()).min(1)}).parse(payload);if(!preview||preview.token!==v.token)throw new Error('أعد فتح معاينة الاستيراد');const rows=preview.rows.filter(r=>v.rows.includes(r.row));if(rows.length!==new Set(v.rows).size)throw new Error('صفوف غير صالحة');const count=store.importRows(preview.fingerprint,rows);preview=null;return count;
     }
     case 'export.excel':{
-      const opts=validatedExport(payload);const p=exportPeriod(opts);const picked=await dialog.showSaveDialog(win,{defaultPath:`رواتب-${p.month}.xlsx`,filters:[{name:'Excel',extensions:['xlsx']}]});if(picked.canceled||!picked.filePath)return null;
-      const w=await printWindow({...opts,template:'slip'});let logo:Buffer;try{const image=await w.webContents.executeJavaScript(`new Promise((resolve,reject)=>{const img=document.images[0];const c=document.createElement('canvas');c.width=400;c.height=240;c.getContext('2d').drawImage(img,0,0,400,240);resolve(c.toDataURL('image/png').split(',')[1]);})`);logo=Buffer.from(image,'base64');}finally{w.destroy();}
-      const buffer=await excelBuffer(p,opts,logo);writeFileSync(picked.filePath+'.tmp',buffer);renameSync(picked.filePath+'.tmp',picked.filePath);store.audit('تصدير Excel',{month:p.month,count:opts.entryIds.length});return picked.filePath;
+      const opts=validatedExport(payload);const p=exportPeriod(opts);const picked=await dialog.showSaveDialog(win,{defaultPath:`${opts.template==='monthly'?'التقرير-الشهري':'رواتب'}-${p.month}.xlsx`,filters:[{name:'Excel',extensions:['xlsx']}]});if(picked.canceled||!picked.filePath)return null;
+      const w=await printWindow(opts.template==='monthly'?opts:{...opts,template:'slip'});let assets:{logo:Buffer;charts:Record<string,Buffer>};try{assets=await exportImages(w);}finally{w.destroy();}
+      const buffer=await excelBuffer(p,opts,assets.logo,assets.charts);writeFileSync(picked.filePath+'.tmp',buffer);renameSync(picked.filePath+'.tmp',picked.filePath);store.audit(opts.template==='monthly'?'تصدير التقرير الشهري Excel':'تصدير Excel',{month:p.month,count:opts.entryIds.length});return picked.filePath;
     }
     case 'export.pdf':case 'export.print':{
       const opts=validatedExport(payload);const w=await printWindow(opts);try{
-        if(method==='export.print'){await new Promise<void>((resolve,reject)=>w.webContents.print({silent:false,printBackground:!opts.monochrome},(ok,why)=>ok?resolve():reject(new Error(why==='cancelled'?'أُلغيت الطباعة':`لم تكتمل الطباعة: ${why}`))));return 'أُرسل إلى الطابعة';}
-        const p=exportPeriod(opts);const picked=await dialog.showSaveDialog(win,{defaultPath:`قسائم-${p.month}.pdf`,filters:[{name:'PDF',extensions:['pdf']}]});if(picked.canceled||!picked.filePath)return null;
-        const pdf=await w.webContents.printToPDF({printBackground:true,preferCSSPageSize:true});writeFileSync(picked.filePath+'.tmp',pdf);renameSync(picked.filePath+'.tmp',picked.filePath);store.audit('تصدير PDF',{month:p.month,count:opts.entryIds.length});await shell.openPath(picked.filePath);return picked.filePath;
+        if(method==='export.print'){await new Promise<void>((resolve,reject)=>w.webContents.print({silent:false,printBackground:true},(ok,why)=>ok?resolve():reject(new Error(why==='cancelled'?'أُلغيت الطباعة':`لم تكتمل الطباعة: ${why}`))));return 'أُرسل إلى الطابعة';}
+        const p=exportPeriod(opts);const picked=await dialog.showSaveDialog(win,{defaultPath:`${opts.template==='monthly'?'التقرير-الشهري':'قسائم'}-${p.month}.pdf`,filters:[{name:'PDF',extensions:['pdf']}]});if(picked.canceled||!picked.filePath)return null;
+        const pdf=await w.webContents.printToPDF({printBackground:true,preferCSSPageSize:true});writeFileSync(picked.filePath+'.tmp',pdf);renameSync(picked.filePath+'.tmp',picked.filePath);store.audit(opts.template==='monthly'?'تصدير التقرير الشهري PDF':'تصدير PDF',{month:p.month,count:opts.entryIds.length});await shell.openPath(picked.filePath);return picked.filePath;
       }finally{w.destroy();}
     }
     case 'backup.create':{const picked=await dialog.showSaveDialog(win,{defaultPath:`kayan-backup-${new Date().toISOString().slice(0,10)}.sqlite`,filters:[{name:'نسخة كيان',extensions:['sqlite']}]});if(picked.canceled||!picked.filePath)return null;if(path.resolve(picked.filePath)===path.resolve(dbPath))throw new Error('اختر مسارًا مختلفًا عن القاعدة المستخدمة');await store.backup(picked.filePath);store.audit('نسخة احتياطية يدوية',{});return picked.filePath;}
@@ -127,7 +134,10 @@ app.whenReady().then(async()=>{
   store=new Store(dbPath);
   const day=new Date().toISOString().slice(0,10);const daily=path.join(dataDir,'backups',`daily-${day}.sqlite`);if(!existsSync(daily)){mkdirSync(path.dirname(daily),{recursive:true});await store.backup(daily);}
   const pkg=JSON.parse(readFileSync(path.join(root,'package.json'),'utf8'));
-  win=new BrowserWindow({width:1440,height:950,minWidth:1050,minHeight:720,show:!process.env.KAYAN_TEST_DATA,backgroundColor:'#f5f6f8',title:`كيان | إدارة الرواتب — الإصدار ${pkg.version}`,icon:path.join(root,'assets/brand/icon.ico'),autoHideMenuBar:true,webPreferences:{preload:path.join(__dirname,'preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false}});restricted(win);
+  const appIconPath=path.join(root,'assets/brand/icon.ico');
+  win=new BrowserWindow({width:1440,height:950,minWidth:1050,minHeight:720,show:!process.env.KAYAN_TEST_DATA,backgroundColor:'#f5f6f8',title:`كيان | إدارة الرواتب — الإصدار ${pkg.version}`,icon:appIconPath,autoHideMenuBar:true,webPreferences:{preload:path.join(__dirname,'preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false}});
+  win.setIcon(appIconPath);
+  restricted(win);
   ipcMain.handle('payroll',async(event,method,payload)=>{activeRequests++;try{if(event.sender!==win.webContents||event.senderFrame!==win.webContents.mainFrame)throw new Error('مصدر غير مصرح');return {ok:true,data:await handle(method,payload)};}catch(e:any){return {ok:false,error:e?.name==='ZodError'?'راجع الحقول المطلوبة وصيغة البيانات':e.message||'تعذر إكمال العملية'};}finally{activeRequests--;}});
   await win.loadFile(path.join(root,'dist/renderer/index.html'));
 

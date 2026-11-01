@@ -1,10 +1,15 @@
 import { describe,it,expect } from 'vitest';
-import { calculate,emptyInputs,numeric } from '../src/domain/payroll';
+import { calculate,emptyDaily,emptyInputs,numeric,normalizeInputs } from '../src/domain/payroll';
 const settings = { livingDayRate:75, fellowshipRate:0.01, fellowshipMin:50, daysInMonth:30, workingHours:8, delayByHours:true, customFields: [] };
 describe('محرك الرواتب',()=>{
   it.each([['3000',5000],['5000',5000],['5000.50',5001],['100000',100000]])('صندوق الزمالة %s',(basic,fund)=>expect(calculate(emptyInputs(basic),settings).amounts.fellowship).toBe(fund));
   it('يطبق مثال الشهر كاملًا دون جمع أيام الغياب',()=>{const r=calculate({...emptyInputs('6000'),assignmentMode:'days',assignmentDays:'3',incentive:'500',livingDays:'20',transport:'300',other:'100',advance:'1000',absenceDays:'2',delayUnit:'days',delayQuantity:'1'},settings);expect([r.gross,r.deductions,r.net]).toEqual([900000,166000,734000]);});
-  it('ساعتان خصم تأخير عند أساسي 6000 وعمل 8 ساعات = 50 جنيه',()=>expect(calculate({...emptyInputs('6000'),delayQuantity:'2'},settings).amounts.delay).toBe(5000));
+  it('يحسب ساعتين تأخير عند أساسي 6000 على ثمن يوم العمل = 50 جنيه',()=>expect(calculate({...emptyInputs('6000'),delayQuantity:'2'},settings).amounts.delay).toBe(5000));
+  it('يحسب التأخير اليومي بوحدة الساعة نفسها',()=>expect(calculate(emptyInputs('6000'),settings,false,{daily:{...emptyDaily(),delay:'2'}}).amounts.delay).toBe(5000));
+  it('يقبل إدخال 2:45 ويحسبه ساعتين وثلاثة أرباع',()=>expect(calculate({...emptyInputs('6000'),delayQuantity:'2:45'},settings).amounts.delay).toBe(6875));
+  it('يحسب اليوم الإضافي بأجر اليوم العادي والغياب المضاعف بيومين',()=>{const r=calculate({...emptyInputs('6000'),overtimeDays:'1.5',doubleAbsenceDays:'1'},settings);expect(r.amounts.overtime).toBe(30000);expect(r.amounts.doubleAbsence).toBe(40000);expect(r.net).toBe(calculate(emptyInputs('6000'),settings).net-10000);});
+  it('يخصم الجزاء الزمني بالساعات أو الأيام مع الاحتفاظ بالجزاء النقدي',()=>{const r=calculate({...emptyInputs('6000'),penaltyUnit:'hours',penaltyQuantity:'4',penalties:'15',note:'مخالفة'},settings,true);expect(r.amounts.timePenalty).toBe(10000);expect(r.amounts.penalties).toBe(1500);});
+  it('يحوّل السجلات القديمة إلى مدخلات جديدة بصفر دون تغيير قيمها',()=>{const old:any={...emptyInputs('6000')};delete old.overtimeDays;delete old.doubleAbsenceDays;delete old.penaltyUnit;delete old.penaltyQuantity;delete old.accrualStartDate;expect(normalizeInputs(old)).toMatchObject({overtimeDays:'0',doubleAbsenceDays:'0',penaltyUnit:'hours',penaltyQuantity:'0',accrualStartDate:''});expect(calculate(old,settings).net).toBe(calculate(emptyInputs('6000'),settings).net);});
   it('لا تقريب مبكر لأجر اليوم',()=>expect(calculate({...emptyInputs('10000'),assignmentMode:'days',assignmentDays:'3'},settings).amounts.assignment).toBe(100000));
   it('يدعم الأيام الكسرية',()=>expect(calculate({...emptyInputs('6000'),absenceDays:'1.5'},settings).amounts.absence).toBe(30000));
   it('المبلغ صفر لا يفعّل الأيام القديمة',()=>expect(calculate({...emptyInputs('6000'),assignmentDays:'3'},settings).amounts.assignment).toBe(0));

@@ -25,9 +25,9 @@ export default function FormulaStudio({initial,busy,save}:{initial:FormulaSettin
 
  // Verify that the delay calculation is correct: N hours at basic salary
  const delayVerify=()=>{
-   const wh=v.workingHours||8;const dim=v.daysInMonth||30;const b=Number(sample)||6000;
-   const dayVal=b/dim;const hrVal=dayVal/wh;
-   return {dayValue:dayVal,hourValue:hrVal,expected:hrVal*Number(delayHoursSample)};
+   const dim=v.daysInMonth||30;const b=Number(sample)||6000;
+   const dayVal=b/dim;
+   return {dayValue:dayVal,expected:dayVal*Number(delayHoursSample)/(v.workingHours||8)};
  };
  const dv=delayVerify();
 
@@ -37,18 +37,21 @@ export default function FormulaStudio({initial,busy,save}:{initial:FormulaSettin
  {tab==='basic'&&<><h3>الثوابت القابلة للتحكم</h3>
    <div className="form-grid">{constantNames.map(([key,title,symbol,hint])=><label className="field" key={key}><span>{title}</span><input type="number" step="any" value={String(v[key])} onChange={e=>set({...v,[key]:e.target.value===''?NaN:Number(e.target.value)})}/><small dir="ltr">{symbol}</small>{hint&&<small className="muted">{hint}</small>}</label>)}</div>
    <label className="field"><span>احتساب المبالغ الشهرية حتى اليوم</span><select value={v.monthlyAccrual||'onDate'} onChange={e=>set({...v,monthlyAccrual:e.target.value as any})}><option value="onDate">المبلغ كاملًا من تاريخ سريانه</option><option value="prorated">توزيع المبلغ على أيام الشهر</option></select><small>يشمل التكليف المباشر والحافز والمواصلات وأخرى. الإضافات اليومية تُحسب في تاريخها.</small></label>
-   <div className="alert"><b>✔ قاعدة التأخير الصحيحة:</b> الساعات تُحوَّل تلقائيًا إلى أيام بقسمتها على <b>ساعات العمل اليومية ({v.workingHours||8})</b> قبل الحساب. مثال: {delayHoursSample} ساعة ÷ {v.workingHours||8} = {(Number(delayHoursSample)/(v.workingHours||8)).toFixed(4)} يوم × (أساسي ÷ {v.daysInMonth||30}) = <b>{(dv.hourValue*Number(delayHoursSample)).toFixed(2)} جنيه</b> عند أساسي {sample}.</div>
+   <div className="alert"><b>قاعدة التأخير الافتراضية:</b> ساعات التأخير ÷ ساعات العمل اليومية × الأساسي ÷ مقام الشهر. مثال: {delayHoursSample} ساعات × ({sample} ÷ {v.daysInMonth||30} ÷ {v.workingHours||8}) = <b>{dv.expected.toFixed(2)} جنيه</b>.</div>
    <h3>ثوابت إضافية</h3>{Object.entries(v.constants||{}).map(([key,value])=><div className="actions" key={key}><code>{key}</code><input aria-label={key} value={value} onChange={e=>set({...v,constants:{...v.constants,[key]:e.target.value}})}/><button className="text-button" onClick={()=>{const next={...v.constants};delete next[key];set({...v,constants:next});}}>حذف</button></div>)}<button className="secondary" onClick={()=>{let i=1;while(v.constants?.[`rate_${i}`])i++;set({...v,constants:{...v.constants,[`rate_${i}`]:'0'}});}}>إضافة ثابت</button>
  </>}
- {tab==='rules'&&<><h3>طريقة حساب كل بند</h3><p className="muted">اترك القاعدة الافتراضية، أو اكتب معادلة مخصصة. <code>basic</code> = الراتب الشهري المرجعي، <code>accrualRatio</code> = نسبة الفترة المستحقة، <code>delayDays</code> = ساعات التأخير محوّلة إلى أيام تلقائيًا.</p>
+ {tab==='rules'&&<><h3>طريقة حساب كل بند</h3><p className="muted">اترك القاعدة الافتراضية، أو اكتب معادلة مخصصة. <code>basic</code> = الراتب الشهري المرجعي، <code>accrualRatio</code> = نسبة الفترة المستحقة، <code>delayDays</code> = ساعات التأخير محوّلة إلى أيام عند كتابة معادلة مخصصة.</p>
  {(Object.keys(labels) as AmountKey[]).map(key=><div className="rule-editor" key={key}><div><b>{labels[key]}</b><button className="text-button" onClick={()=>{const next={...v.expressions};delete next[key];set({...v,expressions:next});}}>استعادة الافتراضي</button></div>
    <input aria-label={`معادلة ${labels[key]}`} dir="ltr" value={v.expressions?.[key]??defaultExpressions[key]} onChange={e=>set({...v,expressions:{...v.expressions,[key]:e.target.value}})}/>
    <small>الناتج في المثال: {result?money(result.amounts[key]):'—'} جنيه</small>
-   {key==='delay'&&<small className="muted">⚠ المتغير <code>delayDays</code> = إجمالي التأخير محوّلًا إلى أيام (ساعات اليومية ÷ workingHours). <code>delayHours</code> = عدد الساعات الخام. <code>delayQuantity</code> = نفس <code>delayDays</code> للتوافق.</small>}
+   {key==='delay'&&<small className="muted"><code>delayDays</code> هو الوقت المكافئ بالأيام بعد تحويل الساعات إلى ساعات العمل اليومية. <code>delayChargeQuantity</code> يظل متاحًا للمعادلات القديمة.</small>}
    {key==='absence'&&<small className="muted">المتغير <code>absenceDays</code> = مجموع أيام الغياب الشهرية + اليومية.</small>}
+   {key==='overtime'&&<small className="muted">المتغير <code>overtimeDays</code> يحسب أجر الأيام الإضافية بالسعر اليومي العادي.</small>}
+   {key==='doubleAbsence'&&<small className="muted">المتغير <code>doubleAbsenceDays</code> = أيام الغياب التي يخصم كل منها أجر يومين.</small>}
+   {key==='timePenalty'&&<small className="muted">المتغير <code>penaltyDays</code> يحول ساعات الجزاء إلى أيام عمل؛ يمكن استخدامه أو تخصيص القاعدة.</small>}
  </div>)}
  <details><summary>مرجع المتغيرات والدوال</summary><p>العمليات + − * / والأقواس. الدوال: MIN، MAX، ROUND، ABS، CEIL، FLOOR.</p>
- <code className="variable-list">basic · daysInMonth · workingHours · accrualRatio · elapsedDays · livingDays · livingDayRate · absenceDays · delayDays · delayHours · delayQuantity (=delayDays) · assignmentBase · incentiveInput · transportInput · otherInput · advanceInput · penaltiesInput · dailyIncentive · dailyTransport · dailyOther · dailyAssignment · dailyAdvance · dailyDeductionInput · fellowshipRate · fellowshipMin</code>
+ <code className="variable-list">basic · daysInMonth · workingHours · accrualRatio · elapsedDays · livingDays · livingDayRate · absenceDays · doubleAbsenceDays · overtimeDays · penaltyDays · delayChargeQuantity · delayDays · delayHours · delayQuantity (=delayDays) · assignmentBase · incentiveInput · transportInput · otherInput · advanceInput · penaltiesInput · dailyIncentive · dailyTransport · dailyOther · dailyAssignment · dailyAdvance · dailyDeductionInput · fellowshipRate · fellowshipMin</code>
  </details></>}
  {tab==='custom'&&<><h3>حقول الشركة الإضافية</h3><p className="muted">استحقاق أو استقطاع بمعادلة، قيمة ثابتة، أو إدخال يدوي في كل راتب.</p>{v.customFields.map((f,i)=><div className="custom-rule" key={f.id}><div className="form-grid"><label className="field"><span>اسم الحقل</span><input value={f.name} onChange={e=>set({...v,customFields:v.customFields.map((x,j)=>i===j?{...x,name:e.target.value}:x)})}/></label><label className="field"><span>النوع</span><select value={f.type} onChange={e=>set({...v,customFields:v.customFields.map((x,j)=>i===j?{...x,type:e.target.value as any}:x)})}><option value="earning">استحقاق</option><option value="deduction">استقطاع</option></select></label></div><div className="actions"><code>{f.id}</code><select value={f.mode||'formula'} onChange={e=>set({...v,customFields:v.customFields.map((x,j)=>i===j?{...x,mode:e.target.value as any}:x)})}><option value="formula">معادلة</option><option value="fixed">رقم ثابت</option><option value="manual">إدخال شهري</option></select><button className="danger" onClick={()=>set({...v,customFields:v.customFields.filter((_,j)=>j!==i)})}>إزالة الحقل</button></div>{f.mode!=='manual'&&<input className="formula-input" dir="ltr" value={f.mode==='fixed'?f.value||'0':f.formula} onChange={e=>set({...v,customFields:v.customFields.map((x,j)=>i===j?{...x,[f.mode==='fixed'?'value':'formula']:e.target.value}:x)})}/>}<small>المعاينة: {result?money(result.customAmounts[f.id]||0):'—'} جنيه</small></div>)}<button className="secondary" onClick={()=>set({...v,customFields:[...v.customFields,{id:`field_${Date.now()}`,name:'حقل جديد',type:'earning',mode:'formula',formula:'basic * 0.05'}]})}>إضافة حقل</button></>}
  </section>

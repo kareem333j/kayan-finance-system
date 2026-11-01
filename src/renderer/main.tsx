@@ -1,4 +1,4 @@
-import {employeeCompanies} from '../shared/types';
+import {employeeCompanies,dailyLabels} from '../shared/types';
 
 import type {CloudStatus} from '../shared/cloud';
 import React, { useState, useEffect, useMemo } from 'react';
@@ -14,10 +14,10 @@ import {todayLocal,defaultCutoff,accrualDays,monthEnd} from '../domain/dates';
 import AdminPanel,{PasswordPanel} from './AdminPanel';
 import BulkEditor from './BulkEditor';
 import logo from '../../assets/brand/logo.svg';
-import icon from '../../assets/brand/icon.jpeg';
+import icon from '../../assets/brand/icon.png';
 import pkg from '../../package.json';
 import { calculate, emptyInputs, money, labels, earningKeys, deductionKeys, type Inputs } from '../domain/payroll';
-import type { Employee, Period, Entry, State, ImportPreview, ExportOptions, FormulaSettings, RegisterColumn } from '../shared/types';
+import type { Employee, Period, Entry, State, ImportPreview, ExportOptions, FormulaSettings, RegisterColumn, MonthlyReportSection, MonthlyReportColumn } from '../shared/types';
 
 const api = window.payroll;
 
@@ -117,22 +117,29 @@ function Empty({ title, text, action }: { title: string; text: string; action?: 
   );
 }
 
-function Toolbar({ search, setSearch, center, setCenter, centers, count }: {
+function Toolbar({ search, setSearch, center, setCenter, centers, count, extraFilters }: {
   search: string; setSearch: (s: string) => void;
   center: string; setCenter: (s: string) => void;
   centers: string[]; count: number;
+  extraFilters?: React.ReactNode;
 }) {
+  const [expanded, setExpanded] = React.useState(false);
   return (
-    <div className="toolbar">
-      <div className="search">
-        <Icon name="search"/>
-        <input aria-label="بحث" placeholder="ابحث بالاسم أو الكود أو الوظيفة…" value={search} onChange={e => setSearch(e.target.value)}/>
+    <div className="toolbar-wrap sticky-toolbar">
+      <div className="toolbar">
+        <div className="search">
+          <Icon name="search"/>
+          <input aria-label="بحث" placeholder="ابحث بالاسم أو الكود أو الوظيفة أو الإدارة…" value={search} onChange={e => setSearch(e.target.value)}/>
+          {search && <button className="search-clear" onClick={() => setSearch("")}>×</button>}
+        </div>
+        <select aria-label="مركز التكلفة" value={center} onChange={e => setCenter(e.target.value)}>
+          <option value="">كل مراكز التكلفة</option>
+          {[...new Set(centers)].filter(Boolean).sort().map(cc => <option key={cc}>{cc}</option>)}
+        </select>
+        <button className={"filter-toggle " + (expanded ? "active" : "")} onClick={() => setExpanded(x => !x)} title="فلاتر متقدمة"><Icon name="sliders" size={15}/>{expanded ? "إخفاء الفلاتر" : "فلاتر متقدمة"}</button>
+        <span className="toolbar-count">{count} سجل</span>
       </div>
-      <select aria-label="مركز التكلفة" value={center} onChange={e => setCenter(e.target.value)}>
-        <option value="">كل مراكز التكلفة</option>
-        {[...new Set(centers)].filter(Boolean).sort().map(c => <option key={c}>{c}</option>)}
-      </select>
-      <span className="toolbar-count">{count} سجل</span>
+      {expanded && <div className="advanced-filters">{extraFilters}<div className="filter-hint">كل فلتر يُطبّق فورًا مع نص البحث، ويمكن جمع أكثر من شرط.</div></div>}
     </div>
   );
 }
@@ -227,7 +234,7 @@ function EmployeeForm({ employee, busy, onClose, save, remove, onExport }: {
           <Field label="ملاحظات">
             <textarea value={v.notes || ''} onChange={e => setV({ ...v, notes: e.target.value })}/>
           </Field>
-          <small className="muted">الأساسي هنا يستخدم للكشوف الجديدة فقط. الاستحقاق الجزئي يحسب تلقائيًا حسب تاريخ التعيين وانتهاء العمل.</small>
+          <small className="muted">الأساسي هنا يستخدم للكشوف الجديدة. الموظف الجديد يُضاف تلقائيًا إلى كشوف المسودات المؤهلة. الاستحقاق الجزئي يحسب حسب تاريخ التعيين والانتهاء.</small>
         </div>
         <div className="modal-foot">
           <div style={{display: 'flex', gap: 12}}>
@@ -254,12 +261,14 @@ function EntryForm({ entry, period, busy, close, save }: {
   const [effectiveDate,setEffectiveDate]=useState(`${period.month}-01`);
   const locked = period.status === 'approved';
   const penaltiesEnabled = !!period.policy?.penaltiesEnabled;
+  const snapshotStart=entry.snapshot.startDate.startsWith(period.month)?entry.snapshot.startDate:'';
+  const payrollStart=v.accrualStartDate||snapshotStart;
   let result = entry.result, error = '';
-  try { if (!locked) result = calculate(v, period.policy!.formulas, penaltiesEnabled,{daily:entry.daily,accrualDays:accrualDays(period.month,monthEnd(period.month),entry.snapshot.startDate,entry.snapshot.endDate,period.policy!.formulas.daysInMonth)}); } catch (e: any) { result = null; error = e.message; }
+  try { if (!locked) result = calculate(v, period.policy!.formulas, penaltiesEnabled,{daily:entry.daily,accrualDays:accrualDays(period.month,monthEnd(period.month),payrollStart,entry.snapshot.endDate,period.policy!.formulas.daysInMonth)}); } catch (e: any) { result = null; error = e.message; }
   const update = (k: keyof Inputs, value: string) => { setV({ ...v, [k]: value }); setChecked(false); };
   const f = (key: keyof Inputs, label: string, hint?: string) => (
     <Field key={key} label={label} hint={hint}>
-      <input disabled={locked} inputMode="decimal" value={String(v[key]??'')} onChange={e => update(key, e.target.value)} className="number-input"/>
+      <input disabled={locked} inputMode={key==='delayQuantity'||key==='penaltyQuantity'?'text':'decimal'} placeholder={key==='delayQuantity'||key==='penaltyQuantity'?'2:45 أو 2.75':''} value={String(v[key]??'')} onChange={e => update(key, e.target.value)} className="number-input"/>
     </Field>
   );
   const partial = entry.snapshot.startDate.startsWith(period.month) || entry.snapshot.endDate.startsWith(period.month);
@@ -278,12 +287,16 @@ function EntryForm({ entry, period, busy, close, save }: {
           <h3 className="section-title">الاستحقاقات</h3>
           <div className="form-grid three-cols">
             {f('basic', 'الراتب الأساسي')}
+            <Field label="بداية الاستحقاق في هذا الكشف" hint="اتركها كما هي لاستخدام لقطة ملف الموظف. تعديلها يؤثر على هذا الشهر فقط.">
+              <input type="date" min={`${period.month}-01`} max={monthEnd(period.month)} disabled={locked} value={payrollStart} onChange={e=>update('accrualStartDate',e.target.value)}/>
+            </Field>
             <Field label="طريقة حساب التكليف">
               <select disabled={locked} value={v.assignmentMode} onChange={e => update('assignmentMode', e.target.value)}>
                 <option value="amount">مبلغ مباشر</option><option value="days">عدد أيام</option>
               </select>
             </Field>
             {v.assignmentMode === 'amount' ? f('assignmentAmount', 'مبلغ التكليف') : f('assignmentDays', 'أيام التكليف', `عدد الأيام × الأساسي ÷ ${period.policy?.formulas?.daysInMonth ?? 30}`)}
+            {f('overtimeDays', 'أيام عمل إضافية', `اليوم بنفس أجر اليوم العادي: الأساسي ÷ ${period.policy?.formulas?.daysInMonth ?? 30}`)}
             {f('incentive', 'الحافز')}
             {f('livingDays', 'أيام الإعاشة', `اليوم = ${period.policy?.formulas?.livingDayRate ?? 75} جنيهاً`)}
             {f('transport', 'المواصلات')}
@@ -293,15 +306,20 @@ function EntryForm({ entry, period, busy, close, save }: {
           <div className="form-grid three-cols">
             {f('advance', 'السلف المخصومة هذا الشهر', 'مبلغ الخصم من المالية')}
             {f('absenceDays', 'أيام الغياب الإضافية غير المسجلة يوميًا', `عدد الأيام × الأساسي ÷ ${period.policy?.formulas?.daysInMonth ?? 30}`)}
+            {f('doubleAbsenceDays', 'غياب بخصم يومين', `كل يوم غياب × 2 × الأساسي ÷ ${period.policy?.formulas?.daysInMonth ?? 30}`)}
             <Field label="وحدة التأخير">
               <select disabled={locked} value={v.delayUnit} onChange={e => update('delayUnit', e.target.value)}>
                 <option value="hours">ساعات</option><option value="days">أيام</option>
               </select>
             </Field>
-            {f('delayQuantity', v.delayUnit === 'hours' ? 'عدد ساعات التأخير' : 'عدد أيام التأخير', `الكمية × الأساسي ÷ ${period.policy?.formulas?.daysInMonth ?? 30}`)}
-            {penaltiesEnabled && f('penalties', 'جزاءات أخرى', 'اكتب السبب في الملاحظات')}
+            {f('delayQuantity', v.delayUnit === 'hours' ? 'عدد ساعات التأخير' : 'عدد أيام التأخير', v.delayUnit==='hours'?`يمكن إدخال 2:45 أو 2.75. الساعة = أجر اليوم ÷ ${period.policy?.formulas?.workingHours??8}`:`الكمية × الأساسي ÷ ${period.policy?.formulas?.daysInMonth ?? 30}`)}
+            {penaltiesEnabled&&<>
+              <Field label="وحدة الجزاء"><select disabled={locked} value={v.penaltyUnit} onChange={e=>update('penaltyUnit',e.target.value)}><option value="hours">ساعات</option><option value="days">أيام</option></select></Field>
+              {f('penaltyQuantity',v.penaltyUnit==='hours'?'جزاء بالساعات':'جزاء بالأيام',v.penaltyUnit==='hours'?`الساعة = أجر اليوم ÷ ${period.policy?.formulas?.workingHours??8}`:`اليوم × الأساسي ÷ ${period.policy?.formulas?.daysInMonth??30}`)}
+              {f('penalties', 'جزاءات بمبلغ', 'اكتب السبب في الملاحظات')}
+            </>}
           </div>
-          <div className="alert">الحركات اليومية تُضاف تلقائيًا. المسجل: {entry.daily?.absence||0} يوم غياب، {entry.daily?.delay||0} ساعة خصم، {entry.daily?.deduction||0} جنيه خصم مباشر. أدخل هنا الإضافات الشهرية فقط حتى لا تتكرر الخصومات.</div><Field label="تاريخ سريان القيم المعدلة"><input type="date" min={`${period.month}-01`} max={monthEnd(period.month)} disabled={locked} value={effectiveDate} onChange={e=>{const date=e.target.value;setEffectiveDate(date);setChecked(false);if(date)api.call('period.get',{id:period.id,asOf:date}).then((p:Period)=>{const row=p.entries.find(x=>x.id===entry.id);if(row)setV(row.effectiveInputs||row.inputs);});}}/></Field>{period.policy?.formulas.customFields.filter(f=>f.mode==='manual').map(f=><Field key={f.id} label={f.name}><input disabled={locked} value={v.customValues?.[f.id]||'0'} onChange={e=>{setV({...v,customValues:{...v.customValues,[f.id]:e.target.value}});setChecked(false);}}/></Field>)}
+          <div className="alert">الحركات اليومية تُضاف تلقائيًا. المسجل: {entry.daily?.absence||0} يوم غياب عادي، {entry.daily?.doubleAbsence||0} يوم بخصم يومين، {entry.daily?.delay||0} ساعة تأخير، {entry.daily?.deduction||0} جنيه خصم مباشر. أدخل هنا الإضافات الشهرية فقط حتى لا تتكرر الخصومات.</div><Field label="تاريخ سريان القيم المعدلة"><input type="date" min={`${period.month}-01`} max={monthEnd(period.month)} disabled={locked} value={effectiveDate} onChange={e=>{const date=e.target.value;setEffectiveDate(date);setChecked(false);if(date)api.call('period.get',{id:period.id,asOf:date}).then((p:Period)=>{const row=p.entries.find(x=>x.id===entry.id);if(row)setV(row.effectiveInputs||row.inputs);});}}/></Field>{period.policy?.formulas.customFields.filter(f=>f.mode==='manual').map(f=><Field key={f.id} label={f.name}><input disabled={locked} value={v.customValues?.[f.id]||'0'} onChange={e=>{setV({...v,customValues:{...v.customValues,[f.id]:e.target.value}});setChecked(false);}}/></Field>)}
           <Field label="ملاحظات الشهر / سبب الجزاءات">
             <textarea disabled={locked} value={v.note} onChange={e => update('note', e.target.value)}/>
           </Field>
@@ -375,7 +393,7 @@ function SettingsForm({ initial, busy, save }: { initial: State['settings']; bus
       <div className="fixed-rules">
         <div><span>أجر اليوم</span><b>الأساسي ÷ 30</b></div>
         <div><span>الإعاشة</span><b>{v.formulas?.livingDayRate ?? 75} جنيهاً / يوم</b></div>
-        <div><span>التأخير بالساعات</span><b>الساعات × الأساسي ÷ 30</b></div>
+        <div><span>التأخير بالساعات</span><b>الساعات × الأساسي ÷ مقام الشهر ÷ ساعات العمل</b></div>
         <div><span>صندوق الزمالة</span><b>{((v.formulas?.fellowshipRate ?? 0.01) * 100).toFixed(1)}%، بحد أدنى {v.formulas?.fellowshipMin ?? 50}</b></div>
       </div>
       <label className="review-checkbox">
@@ -384,7 +402,7 @@ function SettingsForm({ initial, busy, save }: { initial: State['settings']; bus
       </label>
       <label className="review-checkbox">
         <input type="checkbox" checked={v.penaltiesEnabled} onChange={e => setV({ ...v, penaltiesEnabled: e.target.checked })}/>
-        <span>تفعيل «جزاءات أخرى» كمبلغ يدوي مع سبب إلزامي.</span>
+        <span>تفعيل الجزاءات المالية والزمنية مع سبب إلزامي.</span>
       </label>
       <button className="primary" disabled={busy} onClick={() => save(v)}>حفظ الإعدادات</button>
     </section>
@@ -400,15 +418,18 @@ const ALL_REGISTER_COLS: { key: RegisterColumn; label: string; group: string }[]
   { key: 'paymentMethod', label: 'طريقة الدفع', group: 'بيانات الموظف' },
   { key: 'basic', label: 'الأساسي', group: 'الاستحقاقات' },
   { key: 'assignment', label: 'أوامر التكليف', group: 'الاستحقاقات' },
+  { key: 'overtime', label: 'أيام عمل إضافية', group: 'الاستحقاقات' },
   { key: 'incentive', label: 'حافز', group: 'الاستحقاقات' },
   { key: 'living', label: 'إعاشة', group: 'الاستحقاقات' },
   { key: 'transport', label: 'مواصلات', group: 'الاستحقاقات' },
   { key: 'other', label: 'أخرى', group: 'الاستحقاقات' },
   { key: 'advance', label: 'السلف', group: 'الاستقطاعات' },
   { key: 'absence', label: 'خصم الغياب', group: 'الاستقطاعات' },
+  { key: 'doubleAbsence', label: 'غياب بخصم يومين', group: 'الاستقطاعات' },
   { key: 'delay', label: 'خصم التأخير', group: 'الاستقطاعات' },
   { key: 'fellowship', label: 'صندوق الزمالة', group: 'الاستقطاعات' },
-  { key: 'penalties', label: 'جزاءات أخرى', group: 'الاستقطاعات' },
+  { key: 'penalties', label: 'جزاءات بمبلغ', group: 'الاستقطاعات' },
+  { key: 'timePenalty', label: 'جزاءات بالساعات/الأيام', group: 'الاستقطاعات' },
   {key:'dailyDeduction',label:'خصومات يومية بمبلغ',group:'الاستقطاعات'},
   { key: 'gross', label: 'إجمالي الاستحقاقات', group: 'الملخص' },
   { key: 'deductions', label: 'إجمالي الاستقطاعات', group: 'الملخص' },
@@ -429,19 +450,45 @@ const ALL_SLIP_FIELDS: { key: string; label: string }[] = [
   { key: 'signs', label: 'خانات التوقيع' },
 ];
 
-function ExportModal({ period, ids, busy, close, perform }: {
+const MONTHLY_REPORT_SECTIONS: {key:MonthlyReportSection;label:string}[]=[
+  {key:'overview',label:'الملخص والمؤشرات المالية'},{key:'quality',label:'حالة المراجعة والصرف'},
+  {key:'centers',label:'توزيع مراكز التكلفة'},{key:'payment',label:'طرق الدفع'},
+  {key:'components',label:'تفصيل بنود الرواتب'},{key:'daily',label:'الحركات اليومية'},
+  {key:'employees',label:'تفاصيل الموظفين'}
+];
+const MONTHLY_REPORT_COLUMNS:{key:MonthlyReportColumn;label:string}[]=[
+  {key:'code',label:'الكود'},{key:'name',label:'الاسم'},{key:'employerCompany',label:'الشركة'},
+  {key:'job',label:'الوظيفة'},{key:'department',label:'الإدارة'},{key:'costCenter',label:'مركز التكلفة'},
+  {key:'paymentMethod',label:'طريقة الدفع'},{key:'basic',label:'الأساسي'},
+  {key:'gross',label:'الاستحقاقات'},{key:'deductions',label:'الاستقطاعات'},
+  {key:'net',label:'الصافي'},{key:'checked',label:'المراجعة'},{key:'paid',label:'الصرف'}
+];
+
+function ExportModal({ period, ids, busy, close, perform, defaultTemplate }: {
   period: Period; ids: string[]; busy: boolean;
   close: () => void;
   perform: (method: string, opts: ExportOptions) => void;
+  defaultTemplate?: 'slip' | 'compact' | 'register' | 'monthly';
 }) {
   const [opts, setOpts] = useState<ExportOptions>({
-    periodId: period.id, entryIds: ids, template: 'slip', paper: 'A4',
+    periodId: period.id, entryIds: ids, template: defaultTemplate || 'slip', paper: 'A4',
     hideZeros: true, monochrome: false, explanations: true,asOf:period.asOf,view:'monthly',
     registerColumns: DEFAULT_REGISTER_COLS,
     slipFields: ALL_SLIP_FIELDS.map(f => f.key),
+    reportSections: MONTHLY_REPORT_SECTIONS.map(x=>x.key),
+    reportColumns: MONTHLY_REPORT_COLUMNS.map(x=>x.key),
   });
   const [activeTab, setActiveTab] = useState<'general' | 'columns'>('general');
   const e = period.entries.find(en => ids.includes(en.id));
+  const reportRows=period.entries.filter(entry=>ids.includes(entry.id));
+  const reportGross=reportRows.reduce((sum,entry)=>sum+(entry.result?.gross||0),0);
+  const reportDeductions=reportRows.reduce((sum,entry)=>sum+(entry.result?.deductions||0),0);
+  const reportNet=reportRows.reduce((sum,entry)=>sum+(entry.result?.net||0),0);
+  const reportCenters=Array.from(new Set(reportRows.map(entry=>entry.snapshot.costCenter||'غير محدد'))).map(name=>({name,value:reportRows.filter(entry=>(entry.snapshot.costCenter||'غير محدد')===name).reduce((sum,entry)=>sum+(entry.result?.net||0),0)})).sort((a,b)=>b.value-a.value).slice(0,5);
+  const reportPayment=Array.from(new Set(reportRows.map(entry=>entry.snapshot.paymentMethod||'غير محدد'))).map(name=>({name,value:reportRows.filter(entry=>(entry.snapshot.paymentMethod||'غير محدد')===name).length})).sort((a,b)=>b.value-a.value);
+  const reportComponents=[...earningKeys.map(key=>({name:labels[key],value:reportRows.reduce((sum,row)=>sum+(row.result?.amounts[key]||0),0)})),...deductionKeys.map(key=>({name:labels[key],value:reportRows.reduce((sum,row)=>sum+(row.result?.amounts[key]||0),0)})),...(period.policy?.formulas.customFields||[]).map(field=>({name:field.name,value:reportRows.reduce((sum,row)=>sum+(row.result?.customAmounts?.[field.id]||0),0)}))].filter(item=>item.value!==0).sort((a,b)=>b.value-a.value).slice(0,5);
+  const reportDaily=Object.entries(dailyLabels).map(([key,label])=>({name:label,value:reportRows.reduce((sum,row)=>sum+Number((row.daily as any)?.[key]||0),0)})).filter(item=>item.value!==0);
+  const reportInvalid=opts.template==='monthly'&&(!(opts.reportSections||[]).length||((opts.reportSections||[]).includes('employees')&&!(opts.reportColumns||[]).length));
 
   const toggleRegCol = (col: RegisterColumn) => {
     const cols = opts.registerColumns || DEFAULT_REGISTER_COLS;
@@ -452,6 +499,8 @@ function ExportModal({ period, ids, busy, close, perform }: {
     const fields = opts.slipFields || ALL_SLIP_FIELDS.map(f => f.key);
     setOpts({ ...opts, slipFields: fields.includes(field) ? fields.filter(f => f !== field) : [...fields, field] });
   };
+  const toggleReportSection=(key:MonthlyReportSection)=>{const current=opts.reportSections||MONTHLY_REPORT_SECTIONS.map(x=>x.key);setOpts({...opts,reportSections:current.includes(key)?current.filter(x=>x!==key):[...current,key]});};
+  const toggleReportColumn=(key:MonthlyReportColumn)=>{const current=opts.reportColumns||MONTHLY_REPORT_COLUMNS.map(x=>x.key);setOpts({...opts,reportColumns:current.includes(key)?current.filter(x=>x!==key):[...current,key]});};
 
   // Group columns
   const colGroups = [...new Set(ALL_REGISTER_COLS.map(c => c.group))];
@@ -475,21 +524,22 @@ function ExportModal({ period, ids, busy, close, perform }: {
             <h3>{monthName(period.month)}</h3>
             <p style={{ fontSize: 10, color: '#87949f', marginBottom: 16 }}>{ids.length} موظف · {period.status === 'approved' ? 'نسخة معتمدة' : 'مسودة غير معتمدة'}</p>
 
-            <Field label="نطاق الحساب"><select value={opts.view} onChange={e=>setOpts({...opts,view:e.target.value as any})}><option value="monthly">تسوية الشهر كاملة</option><option value="accrued">المستحق حتى التاريخ المحدد</option></select></Field>{opts.view==='accrued'&&<Field label="تاريخ المستحق"><input type="date" min={`${period.month}-01`} max={monthEnd(period.month)} value={opts.asOf} onChange={e=>setOpts({...opts,asOf:e.target.value})}/></Field>}<Field label="قالب الطباعة">
-              <select value={opts.template} onChange={e => setOpts({ ...opts, template: e.target.value as any, paper: e.target.value === 'compact' ? 'A4' : opts.paper })}>
+            {opts.template!=='monthly'&&<><Field label="نطاق الحساب"><select value={opts.view} onChange={e=>setOpts({...opts,view:e.target.value as any})}><option value="monthly">تسوية الشهر كاملة</option><option value="accrued">المستحق حتى التاريخ المحدد</option></select></Field>{opts.view==='accrued'&&<Field label="تاريخ المستحق"><input type="date" min={`${period.month}-01`} max={monthEnd(period.month)} value={opts.asOf} onChange={e=>setOpts({...opts,asOf:e.target.value})}/></Field>}</>}
+            <Field label="قالب التصدير">
+              <select value={opts.template} onChange={e => {const template=e.target.value as ExportOptions['template'];setOpts({ ...opts, template, view:template==='monthly'?'monthly':opts.view, paper:template==='compact'||template==='monthly'?'A4':opts.paper });}}>
+                <option value="monthly">التقرير الشهري المتكامل</option>
                 <option value="slip">قسيمة مفصلة لكل موظف</option>
                 <option value="compact">قسيمتان على ورقة A4</option>
                 <option value="register">كشف صرف جدولي (كل الموظفين)</option>
               </select>
             </Field>
-            <Field label="حجم الورق">
+            {opts.template!=='monthly'&&<Field label="حجم الورق">
               <select disabled={opts.template === 'compact'} value={opts.paper} onChange={e => setOpts({ ...opts, paper: e.target.value as any })}>
                 <option>A4</option><option>A5</option>
               </select>
-            </Field>
+            </Field>}
             {[
-              ['hideZeros', 'إخفاء البنود الصفرية'],
-              ['explanations', 'إظهار شرح الحساب في القسيمة'],
+              ...(opts.template==='monthly'?[]:[['hideZeros', 'إخفاء البنود الصفرية'],['explanations', 'إظهار شرح الحساب في القسيمة']]),
               ['monochrome', 'نسخة أبيض وأسود'],
             ].map(([key, label]) => (
               <label className="review-checkbox" key={key}>
@@ -499,13 +549,18 @@ function ExportModal({ period, ids, busy, close, perform }: {
               </label>
             ))}
             <div className="alert" style={{ marginTop: 12 }}>
-              ملف PDF يفتح بعد التصدير للمراجعة قبل الطباعة. Excel يحتوي شيتين: كشف إجمالي وقسائم تفصيلية.
+              {opts.template==='monthly'?'يشمل التقرير ملخصًا ورسومًا وجداول قابلة للاختيار، ويُحفظ Excel مع صفحات تفصيلية.':'ملف PDF يفتح بعد التصدير للمراجعة قبل الطباعة. Excel يحتوي كشفًا إجماليًا وقسائم تفصيلية.'}
             </div>
           </>}
 
           {activeTab === 'columns' && <>
             <div style={{ marginTop: 16 }}>
-              {opts.template === 'register' ? (
+              {opts.template === 'monthly' ? (
+                <>
+                  <div className="report-option-group"><b>أقسام التقرير</b>{MONTHLY_REPORT_SECTIONS.map(section=><label key={section.key} className="review-checkbox"><input type="checkbox" checked={(opts.reportSections||[]).includes(section.key)} onChange={()=>toggleReportSection(section.key)}/>{section.label}</label>)}</div>
+                  {(opts.reportSections||[]).includes('employees')&&<div className="report-option-group"><b>حقول تفاصيل الموظفين</b><div className="report-column-options">{MONTHLY_REPORT_COLUMNS.map(column=><label key={column.key} className="review-checkbox"><input type="checkbox" checked={(opts.reportColumns||[]).includes(column.key)} onChange={()=>toggleReportColumn(column.key)}/>{column.label}</label>)}</div></div>}
+                </>
+              ) : opts.template === 'register' ? (
                 <>
                   <p style={{ fontSize: 11, color: '#87949f', marginBottom: 12 }}>اختر الأعمدة التي تظهر في كشف الصرف الجدولي:</p>
                   {colGroups.map(group => (
@@ -545,8 +600,137 @@ function ExportModal({ period, ids, busy, close, perform }: {
 
         {/* Preview — mirrors actual print output */}
         <div className="receipt-preview">
-          <div className="print-preview-label">معاينة القسيمة الأولى من {ids.length}</div>
-          {e && e.result ? (
+          {opts.template === 'monthly' ? <div className="print-preview-label">معاينة التقرير الشهري · {monthName(period.month)}</div> : opts.template === 'register' ? <div className="print-preview-label">معاينة الكشف الجدولي</div> : <div className="print-preview-label">معاينة القسيمة الأولى من {ids.length}</div>}
+          {opts.template === 'monthly' ? (
+            <div className="monthly-report-preview">
+              <header>
+                <img src={logo} alt="شعار الشركة" style={{ height: 50, objectFit: 'contain', borderRadius: 8 }}/>
+                <div>
+                  <b>{period.policy?.company||'كيان'}</b>
+                  <span>التقرير الشهري للرواتب · {monthName(period.month)}</span>
+                </div>
+                <span className={period.status==='approved'?'approved':'draft'}>
+                  {period.status==='approved'?'معتمد':'مسودة'}
+                </span>
+              </header>
+
+              {(opts.reportSections||[]).includes('overview') && (
+                <div className="monthly-preview-kpis">
+                  <div><small>إجمالي الاستحقاقات</small><b>{money(reportGross)}</b></div>
+                  <div><small>إجمالي الاستقطاعات</small><b>{money(reportDeductions)}</b></div>
+                  <div className="highlight"><small>صافي المستحق</small><b>{money(reportNet)}</b></div>
+                  <div><small>متوسط الصافي</small><b>{money(reportRows.length ? Math.round(reportNet / reportRows.length) : 0)}</b></div>
+                  <div><small>عدد الموظفين</small><b>{reportRows.length} موظف</b></div>
+                  <div><small>حالة الاعتماد</small><b style={{fontSize: 9}}>{period.status === 'approved' ? 'معتمد رسمياً' : 'مسودة قيد المراجعة'}</b></div>
+                </div>
+              )}
+
+              {(opts.reportSections||[]).includes('quality') && (
+                <div className="monthly-preview-quality">
+                  <span className="q-tag-reviewed">✓ مراجَع {reportRows.filter(x=>x.checked&&!x.error&&!!x.result&&x.result.net>=0).length}</span>
+                  <span className="q-tag-pending">⏱ بانتظار {reportRows.filter(x=>!x.checked||!!x.error||!x.result||(x.result?.net||0)<0).length}</span>
+                  <span className="q-tag-incomplete">⚠ ناقص {reportRows.filter(x=>!!x.error||!x.result).length}</span>
+                  <span className="q-tag-paid">💳 صُرف {reportRows.filter(x=>x.paid).length}</span>
+                  <span className="q-tag-unpaid">⏳ لم يُصرف {reportRows.filter(x=>!x.paid).length}</span>
+                </div>
+              )}
+
+              {(opts.reportSections||[]).includes('centers') && (
+                <div className="monthly-preview-chart">
+                  <b>صافي المستحق حسب مركز التكلفة</b>
+                  {reportCenters.map((x, i) => {
+                    const maxVal = Math.max(1, ...reportCenters.map(y => y.value));
+                    const pct = reportNet > 0 ? Math.round((x.value / reportNet) * 100) : 0;
+                    return (
+                      <div key={x.name} className="preview-chart-row">
+                        <span title={x.name}>{x.name}</span>
+                        <i><em style={{ width: `${Math.max(2, (x.value / maxVal) * 100)}%`, background: i === 0 ? '#EC671B' : i === 1 ? '#1C2A38' : '#0D9488' }}/></i>
+                        <small className="preview-pct">{pct}%</small>
+                        <small className="preview-val">{money(x.value)}</small>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {(opts.reportSections||[]).includes('payment') && (
+                <div className="monthly-preview-chart">
+                  <b>الموظفون حسب طريقة الدفع</b>
+                  {reportPayment.map((x, i) => {
+                    const maxVal = Math.max(1, ...reportPayment.map(y => y.value));
+                    const pct = reportRows.length > 0 ? Math.round((x.value / reportRows.length) * 100) : 0;
+                    return (
+                      <div key={x.name} className="preview-chart-row">
+                        <span>{x.name}</span>
+                        <i><em style={{ width: `${Math.max(2, (x.value / maxVal) * 100)}%`, background: i === 0 ? '#EC671B' : '#0D9488' }}/></i>
+                        <small className="preview-pct">{pct}%</small>
+                        <small className="preview-val">{x.value} موظف</small>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {(opts.reportSections||[]).includes('components') && (
+                <div className="monthly-preview-chart">
+                  <b>أبرز بنود الراتب</b>
+                  {reportComponents.map((x, i) => {
+                    const maxVal = Math.max(1, ...reportComponents.map(y => y.value));
+                    return (
+                      <div key={x.name} className="preview-chart-row">
+                        <span title={x.name}>{x.name}</span>
+                        <i><em style={{ width: `${Math.max(2, (x.value / maxVal) * 100)}%`, background: i % 2 === 0 ? '#EC671B' : '#C05621' }}/></i>
+                        <small className="preview-val">{money(x.value)}</small>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {(opts.reportSections||[]).includes('daily') && (
+                <div className="monthly-preview-chart">
+                  <b>الحركات اليومية</b>
+                  {reportDaily.length ? reportDaily.map(x => (
+                    <div key={x.name} className="preview-chart-row">
+                      <span>{x.name}</span>
+                      <i><em style={{ width: `${Math.max(2, (x.value / Math.max(1, ...reportDaily.map(y => y.value))) * 100)}%`, background: '#EC671B' }}/></i>
+                      <small className="preview-val">{x.value.toLocaleString('ar-EG')}</small>
+                    </div>
+                  )) : <small style={{ color: '#94A3B8' }}>لا توجد حركات مسجلة في هذا الشهر.</small>}
+                </div>
+              )}
+
+              {(opts.reportSections||[]).includes('employees') && (
+                <div className="monthly-preview-table">
+                  <b>تفاصيل الموظفين · أول 5 صفوف</b>
+                  <table>
+                    <thead>
+                      <tr>{MONTHLY_REPORT_COLUMNS.filter(x => (opts.reportColumns||[]).includes(x.key)).map(x => <th key={x.key}>{x.label}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {reportRows.slice(0, 5).map(row => (
+                        <tr key={row.id}>
+                          {MONTHLY_REPORT_COLUMNS.filter(x => (opts.reportColumns||[]).includes(x.key)).map(column => (
+                            <td key={column.key}>
+                              {column.key==='net'?money(row.result?.net||0):column.key==='basic'?money(row.result?.amounts.basic||0):column.key==='gross'?money(row.result?.gross||0):column.key==='deductions'?money(row.result?.deductions||0):column.key==='paid'?(row.paid?'تم الصرف':'لم يُصرف'):column.key==='checked'?(row.checked?'تمت':'بانتظار'):(row.snapshot as any)[column.key]||'—'}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {(opts.reportSections||[]).length === 0 && <p className="muted">اختر قسمًا واحدًا على الأقل لعرضه في التقرير.</p>}
+            </div>
+          ) : opts.template === 'register' ? (
+            <div style={{ textAlign: 'center', color: '#94A3B8', padding: 20, fontSize: 13, background: '#F8FAFC', borderRadius: 8, height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center' }}>
+              <div style={{fontSize:24,marginBottom:12}}>📊</div>
+              <div style={{color:'#1C2A38',fontWeight:600,marginBottom:4}}>تقرير الرواتب الشامل</div>
+              <div style={{fontSize:11}}>سيتم تصدير جدول احترافي يحتوي على بيانات {ids.length} موظف.</div>
+            </div>
+          ) : e ? (e.result ? (
             <div className="print-slip-preview" style={{ background: opts.monochrome ? '#fff' : '#fff', fontFamily: 'inherit', direction: 'rtl', fontSize: 13 }}>
               {/* Header */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 16, borderBottom: `3px solid ${opts.monochrome ? '#475569' : '#EC671B'}`, paddingBottom: 12, marginBottom: 16 }}>
@@ -623,8 +807,14 @@ function ExportModal({ period, ids, busy, close, perform }: {
               </div>
             </div>
           ) : (
+            <div style={{ textAlign: 'center', color: '#94A3B8', padding: 20, fontSize: 12, background: '#F8FAFC', borderRadius: 8 }}>
+              <div style={{fontSize:20,marginBottom:8}}>📋</div>
+              <div>بيانات هذا الموظف غير مكتملة</div>
+              <small style={{color:'#CBD5E1'}}>سيتم تصدير البيانات المتاحة فقط</small>
+            </div>
+          )) : (
             <div style={{ textAlign: 'center', color: '#94A3B8', padding: 32, fontSize: 13 }}>
-              {e ? 'أكمل بيانات الموظف أولاً لعرض المعاينة' : 'لا يوجد موظفون محددون'}
+              لا يوجد موظفون محددون
             </div>
           )}
         </div>
@@ -632,14 +822,14 @@ function ExportModal({ period, ids, busy, close, perform }: {
       <div className="modal-foot">
         <span className="muted">كل المخرجات من نفس أرقام الشهر.</span>
         <div className="actions">
-          <button className="secondary" disabled={busy || !ids.length} onClick={() => perform('export.excel', opts)}>
-            <Icon name="download" size={15}/> تصدير Excel
+          <button className="secondary" disabled={busy || !ids.length || reportInvalid} onClick={() => perform('export.excel', opts)}>
+            <Icon name="download" size={15}/> {opts.template==='monthly'?'تصدير التقرير الشهري Excel':'تصدير Excel'}
           </button>
-          <button className="secondary" disabled={busy || !ids.length} onClick={() => perform('export.pdf', opts)}>
-            <Icon name="export" size={15}/> حفظ PDF
+          <button className="secondary" disabled={busy || !ids.length || reportInvalid} onClick={() => perform('export.pdf', opts)}>
+            <Icon name="export" size={15}/> {opts.template==='monthly'?'تصدير PDF':'حفظ PDF'}
           </button>
-          <button className="primary" disabled={busy || !ids.length} onClick={() => perform('export.print', opts)}>
-            <Icon name="print" size={15}/> طباعة
+          <button className="primary" disabled={busy || !ids.length || reportInvalid} onClick={() => perform('export.print', opts)}>
+            <Icon name="print" size={15}/> {opts.template==='monthly'?'معاينة / طباعة التقرير':'طباعة'}
           </button>
         </div>
       </div>
@@ -660,11 +850,28 @@ function App() {
   const [period, setPeriod] = useState<Period | null>(null);
   const [search, setSearch] = useState('');
   const [center, setCenter] = useState('');
+  const [payFilterJob,setPayFilterJob]=useState('');
+  const [payFilterDept,setPayFilterDept]=useState('');
+  const [payFilterCompany,setPayFilterCompany]=useState('');
+  const [payFilterPayment,setPayFilterPayment]=useState('');
+  const [payFilterReview,setPayFilterReview]=useState('');
+  const [payFilterPaid,setPayFilterPaid]=useState('');
+  const [payFilterWorkStatus,setPayFilterWorkStatus]=useState('');
+  const [payBasicMin,setPayBasicMin]=useState('');
+  const [payBasicMax,setPayBasicMax]=useState('');
+  const [payGrossMin,setPayGrossMin]=useState('');
+  const [payGrossMax,setPayGrossMax]=useState('');
+  const [payDeductionMin,setPayDeductionMin]=useState('');
+  const [payDeductionMax,setPayDeductionMax]=useState('');
+  const [payNetMin,setPayNetMin]=useState('');
+  const [payNetMax,setPayNetMax]=useState('');
   const [employee, setEmployee] = useState<Partial<Employee> | null>(null);
   const [editEntry, setEditEntry] = useState<Entry | null>(null);
   const [imported, setImported] = useState<ImportPreview | null>(null);
   const [importIds, setImportIds] = useState<number[]>([]);
   const [newMonth, setNewMonth] = useState(false);
+  const [deletePeriodConfirm, setDeletePeriodConfirm] = useState(false);
+  const [deletePeriodInput, setDeletePeriodInput] = useState('');
   const [month, setMonth] = useState(todayLocal().slice(0, 7));
   const [exporting, setExporting] = useState(false);
   const [exportingEmployees, setExportingEmployees] = useState<Employee[] | null>(null);
@@ -681,8 +888,16 @@ function App() {
 
   const notify = (text: string, bad = false) => setNotice({ text, bad });
   const run = async (fn: () => Promise<void>) => { if (busy) return; setBusy(true); try { await fn(); } catch (e: any) { notify(e.message, true); } finally { setBusy(false); } };
-  const refresh = async () => { const next = await api.call('state'); setState(next); return next as State; };
-  const openPeriod = async (id: string) => { const p = await api.call('period.get', id); setPeriod(p); setSelected([]); setSearch(''); setCenter(''); };
+  const refresh = async () => {
+    const next = await api.call('state') as State;
+    setState(next);
+    if(period){
+      if(next.periods.some(item=>item.id===period.id))setPeriod(await api.call('period.get',{id:period.id,asOf:period.asOf}));
+      else setPeriod(null);
+    }
+    return next;
+  };
+  const openPeriod = async (id: string) => { const p = await api.call('period.get', id); setPeriod(p); setSelected([]); setSearch(''); setCenter('');setPayFilterJob('');setPayFilterDept('');setPayFilterCompany('');setPayFilterPayment('');setPayFilterReview('');setPayFilterPaid('');setPayFilterWorkStatus('');setPayBasicMin('');setPayBasicMax('');setPayGrossMin('');setPayGrossMax('');setPayDeductionMin('');setPayDeductionMax('');setPayNetMin('');setPayNetMax(''); };
 
   useEffect(() => { api.call('auth.status').then(setAuth).catch((e: any) => notify(e.message, true)); }, []);
   useEffect(() => { if (notice) { const t = setTimeout(() => setNotice(null), 7000); return () => clearTimeout(t); } }, [notice]);
@@ -703,19 +918,58 @@ function App() {
     if (next.periods.length) await openPeriod(next.periods[0].id);
   });
 
-  const entries = useMemo(() => period?.entries.filter(e =>
-    (!search || norm(`${e.snapshot.name} ${e.snapshot.code} ${e.snapshot.job}`).includes(norm(search))) &&
-    (!center || e.snapshot.costCenter === center)
-  ) || [], [period, search, center]);
+  const [filterStatus, setFilterStatus] = React.useState("");
+  const [filterPayment, setFilterPayment] = React.useState("");
+  const [filterDept, setFilterDept] = React.useState("");
+  const [filterJob, setFilterJob] = React.useState("");
+  const [filterCompany, setFilterCompany] = React.useState("");
+  const [filterNationality,setFilterNationality]=React.useState("");
+  const [filterGender,setFilterGender]=React.useState("");
+  const [filterContract,setFilterContract]=React.useState("");
+  const [filterQualification,setFilterQualification]=React.useState("");
+  const [filterStartAfter,setFilterStartAfter]=React.useState("");
+  const [filterStartBefore,setFilterStartBefore]=React.useState("");
+
+  const filterChoices=(key:keyof Employee)=>Array.from(new Set((state?.employees||[]).map(e=>String(e[key]||'')).filter(Boolean))).sort((a,b)=>a.localeCompare(b,'ar'));
+  const periodChoices=(key:keyof Employee)=>Array.from(new Set((period?.entries||[]).map(e=>String(e.snapshot[key]||'')).filter(Boolean))).sort((a,b)=>a.localeCompare(b,'ar'));
 
   const employees = useMemo(() => state?.employees.filter(e =>
-    (!search || norm(`${e.name} ${e.code} ${e.job}`).includes(norm(search))) &&
-    (!center || e.costCenter === center)
-  ) || [], [state, search, center]);
+    (!search || norm(Object.values(e).filter(v=>typeof v==='string'||typeof v==='number').join(' ')).includes(norm(search))) &&
+    (!center || e.costCenter === center) &&
+    (!filterCompany || norm(e.employerCompany || "").includes(norm(filterCompany))) &&
+    (!filterStatus || (filterStatus === "active" ? e.active : !e.active)) &&
+    (!filterPayment || e.paymentMethod === filterPayment) &&
+    (!filterDept || norm(e.department || "").includes(norm(filterDept))) &&
+    (!filterJob || norm(e.job || "").includes(norm(filterJob))) &&
+    (!filterNationality || e.nationality===filterNationality) &&
+    (!filterGender || e.gender===filterGender) &&
+    (!filterContract || e.contractType===filterContract) &&
+    (!filterQualification || e.qualification===filterQualification) &&
+    (!filterStartAfter || !!e.startDate&&e.startDate>=filterStartAfter) &&
+    (!filterStartBefore || !!e.startDate&&e.startDate<=filterStartBefore)
+  ) || [], [state, search, center, filterStatus, filterPayment, filterDept, filterJob, filterCompany,filterNationality,filterGender,filterContract,filterQualification,filterStartAfter,filterStartBefore]);
+
+  const entries = useMemo(() => period?.entries.filter(e => {
+    const snapshot=e.snapshot, result=e.result;
+    const searchable=`${Object.values(snapshot).filter(v=>typeof v==='string'||typeof v==='number').join(' ')} ${Object.values(e.inputs).filter(v=>typeof v==='string'||typeof v==='number').join(' ')} ${result?.gross||0} ${result?.deductions||0} ${result?.net||0}`;
+    const basic=Number(e.inputs.basic||0),gross=(result?.gross||0)/100,deductions=(result?.deductions||0)/100,net=(result?.net||0)/100,reviewed=e.checked&&!!result&&result.net>=0;
+    return (!search||norm(searchable).includes(norm(search)))&&(!center||snapshot.costCenter===center)&&
+      (!payFilterJob||snapshot.job===payFilterJob)&&(!payFilterDept||snapshot.department===payFilterDept)&&
+      (!payFilterCompany||snapshot.employerCompany===payFilterCompany)&&(!payFilterPayment||snapshot.paymentMethod===payFilterPayment)&&
+      (!payFilterReview||(payFilterReview==='reviewed'?reviewed:!reviewed))&&
+      (!payFilterPaid||(payFilterPaid==='paid'?e.paid:!e.paid))&&
+      (!payFilterWorkStatus||(payFilterWorkStatus==='active'?snapshot.active:!snapshot.active))&&
+      (!payBasicMin||basic>=Number(payBasicMin))&&(!payBasicMax||basic<=Number(payBasicMax))&&
+      (!payGrossMin||gross>=Number(payGrossMin))&&(!payGrossMax||gross<=Number(payGrossMax))&&
+      (!payDeductionMin||deductions>=Number(payDeductionMin))&&(!payDeductionMax||deductions<=Number(payDeductionMax))&&
+      (!payNetMin||net>=Number(payNetMin))&&(!payNetMax||net<=Number(payNetMax));
+  })||[],[period,search,center,payFilterJob,payFilterDept,payFilterCompany,payFilterPayment,payFilterReview,payFilterPaid,payFilterWorkStatus,payBasicMin,payBasicMax,payGrossMin,payGrossMax,payDeductionMin,payDeductionMax,payNetMin,payNetMax]);
+
+  useEffect(()=>{setSelected(current=>current.filter(id=>entries.some(entry=>entry.id===id)));},[entries]);
 
   const total = (key: 'net' | 'gross' | 'deductions') => period?.entries.reduce((s, e) => s + (e.result?.[key] || 0), 0) || 0;
   const pending = period?.entries.filter(e => !e.checked || !e.result || e.result.net < 0 || e.result.amounts.basic === 0) || [];
-  const changePage = (id: string) => { setPage(id); setSearch(''); setCenter(''); };
+  const changePage = (id: string) => { setPage(id); setSearch(""); setCenter(""); setFilterStatus(""); setFilterPayment(""); setFilterDept(""); setFilterJob(""); setFilterCompany("");setFilterNationality('');setFilterGender('');setFilterContract('');setFilterQualification('');setFilterStartAfter('');setFilterStartBefore('');setPayFilterJob('');setPayFilterDept('');setPayFilterCompany('');setPayFilterPayment('');setPayFilterReview('');setPayFilterPaid('');setPayFilterWorkStatus('');setPayBasicMin('');setPayBasicMax('');setPayGrossMin('');setPayGrossMax('');setPayDeductionMin('');setPayDeductionMax('');setPayNetMin('');setPayNetMax(''); };
 
   const chooseImport = () => run(async () => {
     const result = await api.call('import.preview');
@@ -773,56 +1027,58 @@ function App() {
   if (!auth) return <div className="loading">جارٍ فتح نظام كيان…</div>;
 
   if (!auth.unlocked) return (
-    <div className="login" style={{display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#0a0f16', minHeight: '100vh', position: 'relative', overflow: 'hidden'}}>
-      {/* Immersive Background Mesh */}
-      <div style={{position: 'absolute', top: '-20%', left: '-10%', width: '70vw', height: '70vw', background: 'radial-gradient(circle, rgba(236,103,27,0.15) 0%, rgba(236,103,27,0) 60%)', filter: 'blur(60px)'}}></div>
-      <div style={{position: 'absolute', bottom: '-20%', right: '-10%', width: '60vw', height: '60vw', background: 'radial-gradient(circle, rgba(28,42,56,0.8) 0%, rgba(0,0,0,0) 60%)', filter: 'blur(60px)'}}></div>
-      <div style={{position: 'absolute', top: '20%', right: '10%', width: '40vw', height: '40vw', background: 'radial-gradient(circle, rgba(255,255,255,0.03) 0%, rgba(0,0,0,0) 50%)', filter: 'blur(40px)'}}></div>
-      
-      {/* Grid Pattern overlay */}
-      <div style={{position: 'absolute', inset: 0, backgroundImage: 'linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px)', backgroundSize: '40px 40px', maskImage: 'radial-gradient(circle at center, black, transparent 80%)', WebkitMaskImage: 'radial-gradient(circle at center, black, transparent 80%)'}}></div>
-
-      {/* Main Glassmorphic Card */}
-      <div style={{background: 'rgba(255, 255, 255, 0.98)', padding: '60px 50px', borderRadius: '32px', boxShadow: '0 40px 80px -20px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255,255,255,0.2)', width: '100%', maxWidth: '480px', zIndex: 1, textAlign: 'center', position: 'relative'}}>
-        
-        {/* Glow behind the logo */}
-        <div style={{position: 'absolute', top: '40px', left: '50%', transform: 'translateX(-50%)', width: '120px', height: '120px', background: 'rgba(236,103,27,0.4)', filter: 'blur(35px)', borderRadius: '50%', zIndex: -1}}></div>
-
-        <div style={{marginBottom: '40px'}}>
-          <img src={icon} alt="كيان" style={{width: '140px', height: '140px', objectFit: 'contain', borderRadius: '28px', boxShadow: '0 16px 32px rgba(28, 42, 56, 0.12), 0 0 0 1px rgba(0,0,0,0.05)', marginBottom: '24px', backgroundColor: '#fff'}}/>
-          <h1 style={{fontSize: '32px', color: '#0f172a', marginBottom: '12px', letterSpacing: '-0.5px', fontWeight: 800}}>نظام إدارة الرواتب</h1>
-          <div style={{display: 'inline-flex', alignItems: 'center', gap: '8px', background: '#f1f5f9', padding: '6px 14px', borderRadius: '20px', fontSize: '12px', color: '#475569', fontWeight: 600, border: '1px solid #e2e8f0'}}>
-            <span style={{color: '#ec671b'}}>الإصدار {pkg.version}</span>
-            <div style={{width: '4px', height: '4px', borderRadius: '50%', background: '#cbd5e1'}}></div>
-            <span>{auth.cloud?'مساحة الشركة المشتركة':'مساحة عمل محلية'}</span>
+    <div className="login-page">
+      <div className="login-orb login-orb-1"></div>
+      <div className="login-orb login-orb-2"></div>
+      <div className="login-orb login-orb-3"></div>
+      <div className="login-grid-overlay"></div>
+      <div className="login-container">
+        <div className="login-brand-panel">
+          <div className="login-brand-content">
+            <div className="login-brand-logo"><img src={icon} alt="كيان"/></div>
+            <h1 className="login-brand-title">كيان</h1>
+            <p className="login-brand-sub">نظام إدارة الرواتب المتكامل</p>
+            <div className="login-brand-features">
+              <div className="login-feature"><span className="login-feature-dot"></span>إدارة رواتب الموظفين بدقة</div>
+              <div className="login-feature"><span className="login-feature-dot"></span>تتبع الحضور والغياب يومياً</div>
+              <div className="login-feature"><span className="login-feature-dot"></span>تقارير مالية احترافية</div>
+              <div className="login-feature"><span className="login-feature-dot"></span>حماية البيانات ونسخ احتياطي</div>
+            </div>
+            <div className="login-version-pill">
+              <div className="login-status-dot"></div>
+              <span>الإصدار {pkg.version} · {auth.cloud?'سحابي':'محلي'}</span>
+            </div>
           </div>
         </div>
-
-        <form onSubmit={e => { e.preventDefault(); signIn(); }} style={{textAlign: 'right'}}>
-          <h2 style={{fontSize: '20px', marginBottom: '8px', color: '#1e293b', fontWeight: 700}}>{auth.configured ? 'تسجيل الدخول للمساحة' : 'إعداد مساحة العمل'}</h2>
-          <p style={{fontSize: '13px', color: '#64748b', marginBottom: '30px', lineHeight: '1.7'}}>{auth.configured ? 'أدخل اسم المستخدم وكلمة المرور للوصول إلى النظام.' : 'أنشئ بيانات دخول قوية لحماية وصولك لبيانات الرواتب.'}</p>
-          
-          <div style={{display: 'flex', flexDirection: 'column', gap: '20px'}}>
-            <Field label="اسم الدخول">
-              <input value={username} disabled={!auth.configured} required onChange={e=>setUsername(e.target.value)} autoComplete="username" style={{background: '#f8fafc', border: '1px solid #e2e8f0', padding: '14px 16px', fontSize: '14px', borderRadius: '12px', color: '#0f172a', fontWeight: 500, transition: 'border-color 0.2s, box-shadow 0.2s'}}/>
-            </Field>
-            {!auth.configured && <small style={{color: '#94a3b8', fontSize: '11px', marginTop: '-12px', display: 'block'}}>الحساب الافتراضي للنظام هو: <strong style={{color: '#64748b'}}>admin</strong></small>}
-            <Field label="كلمة المرور">
-              <input type="password" autoFocus minLength={auth.configured ? 1 : 8} value={password}
-                onChange={e => setPassword(e.target.value)} placeholder="8 أحرف على الأقل" required style={{background: '#f8fafc', border: '1px solid #e2e8f0', padding: '14px 16px', fontSize: '14px', borderRadius: '12px', color: '#0f172a', fontWeight: 500, transition: 'border-color 0.2s, box-shadow 0.2s'}}/>
-            </Field>
+        <div className="login-form-panel">
+          <div className="login-form-card">
+            <div className="login-mobile-logo"><img src={icon} alt="كيان"/></div>
+            <div className="login-form-header">
+              <div className="login-lock-icon"><Icon name="lock" size={22}/></div>
+              <h2>{auth.configured ? 'تسجيل الدخول' : 'إعداد مساحة العمل'}</h2>
+              <p>{auth.configured ? 'أدخل بياناتك للوصول إلى النظام بأمان.' : 'أنشئ بيانات دخول قوية لحماية بيانات الرواتب.'}</p>
+            </div>
+            <form onSubmit={e => { e.preventDefault(); signIn(); }} className="login-form">
+              <Field label="اسم الدخول">
+                <input value={username} disabled={!auth.configured} required onChange={e=>setUsername(e.target.value)} autoComplete="username" className="login-input"/>
+              </Field>
+              {!auth.configured && <small className="login-hint">الحساب الافتراضي: <strong>admin</strong></small>}
+              <Field label="كلمة المرور">
+                <input type="password" autoFocus minLength={auth.configured ? 1 : 8} value={password} onChange={e => setPassword(e.target.value)} placeholder={auth.configured ? '' : '8 أحرف على الأقل'} required className="login-input"/>
+              </Field>
+              <button className="login-submit" disabled={busy}>
+                {busy ? <><span className="login-spinner"></span> جاري التحقق…</> : (auth.configured ? 'دخول آمن' : 'حفظ وبدء العمل')}
+              </button>
+            </form>
+            <div className="login-footer">
+              <span className="login-status-indicator">
+                <div className="login-status-dot active"></div>
+                {cloudStatus?.configured?'متصل بالشركة':'متصل محلياً'}
+              </span>
+              <span>© كيان {new Date().getFullYear()}</span>
+            </div>
           </div>
-          
-          <button className="primary" disabled={busy} style={{width: '100%', marginTop: '35px', padding: '16px', fontSize: '15px', fontWeight: 700, borderRadius: '14px', background: 'linear-gradient(135deg, #ec671b 0%, #d9550c 100%)', boxShadow: '0 8px 20px rgba(236, 103, 27, 0.3)', border: 'none', transition: 'transform 0.2s, box-shadow 0.2s'}}>
-            {busy ? 'جاري التحقق...' : (auth.configured ? 'دخول آمن' : 'حفظ بيانات الدخول')}
-          </button>
-        </form>
-      </div>
-      
-      <div style={{position: 'absolute', bottom: '40px', color: '#94a3b8', fontSize: '12px', zIndex: 1, display: 'flex', alignItems: 'center', gap: '16px', fontWeight: 500}}>
-        <span>جميع الحقوق محفوظة © كيان {new Date().getFullYear()}</span>
-        <div style={{width: '4px', height: '4px', borderRadius: '50%', background: '#475569'}}></div>
-        <span style={{display: 'flex', alignItems: 'center', gap: '8px'}}><div style={{width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', boxShadow: '0 0 12px #10b981'}}></div> {cloudStatus?.configured?'جاهز للاتصال بالشركة':'متصل محلياً'}</span>
+        </div>
       </div>
       {toast}
       {globalOverlays}
@@ -838,7 +1094,7 @@ function App() {
       {/* Sidebar */}
       <aside className="sidebar">
         <div className="brand">
-          <img src={logo}/>
+          <img src={icon}/>
           <div className="brand-caption">إدارة الرواتب<span>PAYROLL WORKSPACE</span></div>
         </div>
         <span className="nav-label">مساحة العمل</span>
@@ -978,9 +1234,27 @@ function App() {
           {/* ─────────── Employees ─────────── */}
           {page === 'daily' && <DailyPanel state={state} onChanged={async()=>{await refresh();if(period)setPeriod(await api.call('period.get',{id:period.id,asOf:period.asOf}));}}/>}
           {page === 'employees' && (
-            <section className="card">
+            <div className="page-section">
               <Toolbar search={search} setSearch={setSearch} center={center} setCenter={setCenter}
-                centers={state.employees.map(e => e.costCenter)} count={employees.length}/>
+                centers={state.employees.map(e => e.costCenter)} count={employees.length}
+                extraFilters={
+                  <div className="filter-grid">
+                    <div className="filter-item"><label>حالة الموظف</label><select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)}><option value="">الكل</option><option value="active">نشط فقط</option><option value="inactive">متوقف فقط</option></select></div>
+                    <div className="filter-item"><label>طريقة الدفع</label><select value={filterPayment} onChange={e=>setFilterPayment(e.target.value)}><option value="">الكل</option>{["نقدي","بنكي","فودافون كاش","إنستا باي","غير محدد"].map(m=><option key={m}>{m}</option>)}</select></div>
+                    <div className="filter-item"><label>الوظيفة</label><select value={filterJob} onChange={e=>setFilterJob(e.target.value)}><option value="">كل الوظائف</option>{filterChoices('job').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>الإدارة</label><select value={filterDept} onChange={e=>setFilterDept(e.target.value)}><option value="">كل الإدارات</option>{filterChoices('department').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>الشركة التابع لها</label><select value={filterCompany} onChange={e=>setFilterCompany(e.target.value)}><option value="">كل الشركات</option>{filterChoices('employerCompany').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>الجنسية</label><select value={filterNationality} onChange={e=>setFilterNationality(e.target.value)}><option value="">كل الجنسيات</option>{filterChoices('nationality').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>النوع</label><select value={filterGender} onChange={e=>setFilterGender(e.target.value)}><option value="">الكل</option>{filterChoices('gender').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>نوع التعاقد</label><select value={filterContract} onChange={e=>setFilterContract(e.target.value)}><option value="">كل التعاقدات</option>{filterChoices('contractType').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>المؤهل</label><select value={filterQualification} onChange={e=>setFilterQualification(e.target.value)}><option value="">كل المؤهلات</option>{filterChoices('qualification').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>التعيين من</label><input type="date" value={filterStartAfter} onChange={e=>setFilterStartAfter(e.target.value)}/></div>
+                    <div className="filter-item"><label>التعيين حتى</label><input type="date" value={filterStartBefore} onChange={e=>setFilterStartBefore(e.target.value)}/></div>
+                    {(filterStatus||filterPayment||filterJob||filterDept||filterCompany||filterNationality||filterGender||filterContract||filterQualification||filterStartAfter||filterStartBefore)&&<button className="filter-reset" onClick={()=>{setFilterStatus("");setFilterPayment("");setFilterJob("");setFilterDept("");setFilterCompany("");setFilterNationality('');setFilterGender('');setFilterContract('');setFilterQualification('');setFilterStartAfter('');setFilterStartBefore('');}}>مسح الفلاتر</button>}
+                  </div>
+                }
+              />
+              <section className="card">
               {!employees.length ? (
                 <Empty title="سجّل فريق العمل" text="ابدأ بملف العمال المرفق أو أضف موظفًا جديدًا."
                   action={<button className="secondary" onClick={chooseImport}>اختيار ملف العمال</button>}/>
@@ -1005,6 +1279,7 @@ function App() {
                 </div>
               )}
             </section>
+            </div>
           )}
 
           {/* ─────────── Payroll ─────────── */}
@@ -1033,6 +1308,11 @@ function App() {
                       })}>
                         <Icon name="users"/>مزامنة
                       </button>
+                      {isAdmin && (
+                        <button className="danger-btn" disabled={busy} onClick={() => setDeletePeriodConfirm(true)}>
+                          <Icon name="trash"/>حذف الكشف
+                        </button>
+                      )}
                       <button className="primary" disabled={!isAdmin || busy} onClick={() => setConfirm({
                       title: 'اعتماد رواتب الشهر',
                       body: 'ستُحفظ نسخة احتياطية وتُقفل أرقام هذا الشهر. تأكد من مراجعة كل الموظفين؛ لا يمكن تعديل النسخة المعتمدة مباشرة.',
@@ -1060,9 +1340,29 @@ function App() {
                 <Stat title="صافي المستحق" value={money(total('net'))} subtitle={`${period.entries.length} موظف · ${pending.length} يحتاج مراجعة`} icon="check" warm/>
               </div>
               {period.entries.some(e => !e.result) && <div className="alert">الأرقام المعروضة إجماليات جزئية. أكمل الأساسي والحقول الناقصة لإظهار جميع الرواتب.</div>}
-              <section className="card">
+              <div className="page-section">
                 <Toolbar search={search} setSearch={setSearch} center={center} setCenter={setCenter}
-                  centers={period.entries.map(e => e.snapshot.costCenter)} count={entries.length}/>
+                  centers={period.entries.map(e => e.snapshot.costCenter)} count={entries.length}
+                  extraFilters={<div className="filter-grid">
+                    <div className="filter-item"><label>الوظيفة</label><select value={payFilterJob} onChange={e=>setPayFilterJob(e.target.value)}><option value="">كل الوظائف</option>{periodChoices('job').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>الإدارة</label><select value={payFilterDept} onChange={e=>setPayFilterDept(e.target.value)}><option value="">كل الإدارات</option>{periodChoices('department').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>الشركة</label><select value={payFilterCompany} onChange={e=>setPayFilterCompany(e.target.value)}><option value="">كل الشركات</option>{periodChoices('employerCompany').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>طريقة الدفع</label><select value={payFilterPayment} onChange={e=>setPayFilterPayment(e.target.value)}><option value="">كل طرق الدفع</option>{periodChoices('paymentMethod').map(x=><option key={x}>{x}</option>)}</select></div>
+                    <div className="filter-item"><label>حالة المراجعة</label><select value={payFilterReview} onChange={e=>setPayFilterReview(e.target.value)}><option value="">الكل</option><option value="reviewed">تمت المراجعة</option><option value="pending">بانتظار المراجعة</option></select></div>
+                    <div className="filter-item"><label>حالة الصرف</label><select value={payFilterPaid} onChange={e=>setPayFilterPaid(e.target.value)}><option value="">الكل</option><option value="paid">تم الصرف</option><option value="unpaid">لم يُصرف</option></select></div>
+                    <div className="filter-item"><label>حالة الموظف وقت المسير</label><select value={payFilterWorkStatus} onChange={e=>setPayFilterWorkStatus(e.target.value)}><option value="">الكل</option><option value="active">نشط</option><option value="inactive">متوقف</option></select></div>
+                    <div className="filter-item"><label>الأساسي من (جنيه)</label><input type="number" min="0" step="0.01" value={payBasicMin} onChange={e=>setPayBasicMin(e.target.value)}/></div>
+                    <div className="filter-item"><label>الأساسي إلى (جنيه)</label><input type="number" min="0" step="0.01" value={payBasicMax} onChange={e=>setPayBasicMax(e.target.value)}/></div>
+                    <div className="filter-item"><label>الاستحقاقات من (جنيه)</label><input type="number" min="0" step="0.01" value={payGrossMin} onChange={e=>setPayGrossMin(e.target.value)}/></div>
+                    <div className="filter-item"><label>الاستحقاقات إلى (جنيه)</label><input type="number" min="0" step="0.01" value={payGrossMax} onChange={e=>setPayGrossMax(e.target.value)}/></div>
+                    <div className="filter-item"><label>الاستقطاعات من (جنيه)</label><input type="number" min="0" step="0.01" value={payDeductionMin} onChange={e=>setPayDeductionMin(e.target.value)}/></div>
+                    <div className="filter-item"><label>الاستقطاعات إلى (جنيه)</label><input type="number" min="0" step="0.01" value={payDeductionMax} onChange={e=>setPayDeductionMax(e.target.value)}/></div>
+                    <div className="filter-item"><label>الصافي من (جنيه)</label><input type="number" step="0.01" value={payNetMin} onChange={e=>setPayNetMin(e.target.value)}/></div>
+                    <div className="filter-item"><label>الصافي إلى (جنيه)</label><input type="number" step="0.01" value={payNetMax} onChange={e=>setPayNetMax(e.target.value)}/></div>
+                    {(payFilterJob||payFilterDept||payFilterCompany||payFilterPayment||payFilterReview||payFilterPaid||payFilterWorkStatus||payBasicMin||payBasicMax||payGrossMin||payGrossMax||payDeductionMin||payDeductionMax||payNetMin||payNetMax)&&<button className="filter-reset" onClick={()=>{setPayFilterJob('');setPayFilterDept('');setPayFilterCompany('');setPayFilterPayment('');setPayFilterReview('');setPayFilterPaid('');setPayFilterWorkStatus('');setPayBasicMin('');setPayBasicMax('');setPayGrossMin('');setPayGrossMax('');setPayDeductionMin('');setPayDeductionMax('');setPayNetMin('');setPayNetMax('');}}>مسح الفلاتر</button>}
+                  </div>}
+                />
+                <section className="card">
                 <div className="table-wrap">
                   <table>
                     <thead>
@@ -1076,20 +1376,22 @@ function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {entries.map(e => (
-                        <tr key={e.id}>
+                      {entries.map(e => {
+                        const denominator=period.policy?.formulas.daysInMonth??30;
+                        const eligibleDays=accrualDays(period.month,monthEnd(period.month),e.inputs.accrualStartDate||e.snapshot.startDate,e.snapshot.endDate,denominator);
+                        return <tr key={e.id}>
                           <td><input type="checkbox" aria-label={`تحديد ${e.snapshot.name}`}
                             checked={selected.includes(e.id)} onChange={ev => setSelected(ev.target.checked ? [...selected, e.id] : selected.filter(id => id !== e.id))}/></td>
                           <td><b>{e.snapshot.name}</b><small>{e.snapshot.job || e.snapshot.code}</small></td>
                           <td><span className="tag">{e.snapshot.costCenter || 'غير محدد'}</span></td>
-                          <td className="num">{e.result ? money(e.result.amounts.basic) : '—'}</td>
+                          <td className="num">{e.result ? <>{money(e.result.amounts.basic)}{eligibleDays<denominator&&<small>{eligibleDays}/{denominator} يوم استحقاق</small>}{e.snapshot.basic&&e.snapshot.basic!==e.inputs.basic&&<small>أساسي الملف: {money(Math.round(Number(e.snapshot.basic)*100))}</small>}</> : '—'}</td>
                           <td className="num">{e.result ? money(e.result.gross) : '—'}</td>
                           <td className="num muted">{e.result ? money(e.result.deductions) : '—'}</td>
                           <td className={`num strong ${e.result && e.result.net < 0 ? 'negative' : ''}`}>{e.result ? money(e.result.net) : 'غير مكتمل'}</td>
                           <td><Badge ok={!!e.checked && !!e.result && e.result.net >= 0} text={e.paid ? 'تم الصرف' : e.checked ? 'تمت المراجعة' : 'بانتظار المراجعة'}/></td>
                           <td><button className="text-button" onClick={() => setEditEntry(e)}>{period.status === 'draft' ? 'تحرير' : 'تفاصيل'}</button></td>
-                        </tr>
-                      ))}
+                        </tr>;
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -1099,6 +1401,7 @@ function App() {
                   <span>الأرقام بالجنيه المصري</span>
                 </div>
               </section>
+              </div>
             </>}
           </>}
 
@@ -1109,31 +1412,72 @@ function App() {
                 <option value="" disabled>اختر شهر التقرير</option>
                 {state.periods.map(p => <option key={p.id} value={p.id}>{monthName(p.month)}</option>)}
               </select>
-              {period && <button className="secondary" onClick={() => setExporting(true)}><Icon name="download"/>تصدير بيانات الشهر</button>}
+              {period && <button className="secondary" onClick={() => setExporting(true)} style={{background:'#1C2A38',color:'white',border:'none'}}><Icon name="download"/> تصدير التقرير الشهري</button>}
             </div>
             {period ? <>
-              <div className="stats three">
-                <Stat title="صندوق الزمالة" value={money(period.entries.reduce((s, e) => s + (e.result?.amounts.fellowship || 0), 0))} subtitle="إجمالي استقطاعات الشهر" icon="users"/>
-                <Stat title="السلف المخصومة" value={money(period.entries.reduce((s, e) => s + (e.result?.amounts.advance || 0), 0))} subtitle="خصم الشهر فقط، وليس الرصيد التاريخي" icon="wallet"/>
-                <Stat title="المتبقي للصرف" value={money(period.entries.filter(e => !e.paid).reduce((s, e) => s + (e.result?.net || 0), 0))} subtitle="وفق تسجيل الصرف الكامل" icon="clock" warm/>
+              {/* Summary Stats */}
+              <div className="stats" style={{gridTemplateColumns:'repeat(4,minmax(0,1fr))'}}>
+                <Stat title="إجمالي الاستحقاقات" value={money(total('gross'))} subtitle="جنيه مصري" icon="wallet"/>
+                <Stat title="إجمالي الاستقطاعات" value={money(total('deductions'))} subtitle="جنيه مصري" icon="chart"/>
+                <Stat title="صافي المستحق" value={money(total('net'))} subtitle={`${period.entries.length} موظف`} icon="check" warm/>
+                <Stat title="صندوق الزمالة" value={money(period.entries.reduce((s,e)=>s+(e.result?.amounts.fellowship||0),0))} subtitle="استقطاعات الشهر" icon="users"/>
               </div>
+              {/* Bar chart - cost centers */}
+              <div className="reports-charts-row">
+                <section className="card reports-chart-card">
+                  <div className="card-head"><h3>توزيع الصافي حسب مركز التكلفة</h3><span>{monthName(period.month)}</span></div>
+                  <div className="chart-body">
+                    {(()=>{
+                      const centers=Array.from(new Set(period.entries.map(e=>e.snapshot.costCenter||'غير محدد')));
+                      const data=centers.map(cc=>({name:cc,net:period.entries.filter(e=>(e.snapshot.costCenter||'غير محدد')===cc).reduce((s,e)=>s+(e.result?.net||0),0),count:period.entries.filter(e=>(e.snapshot.costCenter||'غير محدد')===cc).length})).sort((a,b)=>b.net-a.net);
+                      const maxNet=Math.max(...data.map(d=>d.net),1);
+                      const COLORS=['#ec671b','#1c2a38','#4b9b83','#8b5cf6','#f59e0b','#ef4444','#06b6d4','#84cc16'];
+                      return <div className="bar-chart">{data.map((d,i)=><div key={d.name} className="bar-row"><div className="bar-label" title={d.name}>{d.name}</div><div className="bar-track"><div className="bar-fill" style={{width:`${(d.net/maxNet)*100}%`,background:COLORS[i%COLORS.length]}}></div></div><div className="bar-value">{money(d.net)}</div><div className="bar-count">{d.count} موظف</div></div>)}</div>;
+                    })()}
+                  </div>
+                </section>
+                <section className="card reports-chart-card">
+                  <div className="card-head"><h3>توزيع طرق الصرف</h3><span>عدد الموظفين</span></div>
+                  <div className="chart-body">
+                    {(()=>{
+                      const methods: Record<string, {count: number, net: number}> = {};
+                      period.entries.forEach(e=>{const m=e.snapshot.paymentMethod||'غير محدد';if(!methods[m])methods[m]={count:0,net:0};methods[m].count++;methods[m].net+=e.result?.net||0;});
+                      const total_pm=Object.values(methods).reduce((a,b)=>a+b.count,0)||1;
+                      const COLORS_PM=['#ec671b','#1c2a38','#4b9b83','#8b5cf6','#f59e0b'];
+                      const entries_pm=Object.entries(methods).sort((a,b)=>b[1].count-a[1].count);
+                      let offset=0;const r=78;const circ=2*Math.PI*r;
+                      return <div className="donut-chart-wrap"><svg viewBox="0 0 200 200" className="donut-svg">{entries_pm.map(([m,v],i)=>{const pct=v.count/total_pm;const dash=pct*circ;const el=<circle key={m} cx="100" cy="100" r={r} fill="none" stroke={COLORS_PM[i%COLORS_PM.length]} strokeWidth="30" strokeDasharray={`${dash} ${circ-dash}`} strokeDashoffset={-offset*circ} style={{transform:'rotate(-90deg)',transformOrigin:'50% 50%'}}/>;offset+=pct;return el;})}<text x="100" y="95" textAnchor="middle" style={{fontSize:18,fontWeight:700,fill:'#1c2a38'}}>{period.entries.length}</text><text x="100" y="113" textAnchor="middle" style={{fontSize:10,fill:'#85909c'}}>موظف</text></svg><div className="donut-legend">{entries_pm.map(([m,v],i)=><div key={m} className="legend-item"><span className="legend-dot" style={{background:COLORS_PM[i%COLORS_PM.length]}}></span><span className="legend-label">{m}</span><span className="legend-val">{v.count} موظف</span></div>)}</div></div>;
+                    })()}
+                  </div>
+                </section>
+              </div>
+              {/* Employee comparison bars */}
               <section className="card">
-                <div className="card-head"><h3>تكلفة مراكز العمل</h3><span>{monthName(period.month)}</span></div>
+                <div className="card-head"><h3>مقارنة الاستحقاقات والاستقطاعات — أعلى 10 موظفين</h3><span>بالجنيه المصري</span></div>
+                <div className="chart-body" style={{padding:'20px 24px'}}>
+                  {(()=>{
+                    const sorted=[...period.entries].filter(e=>e.result).sort((a,b)=>b.result!.net-a.result!.net).slice(0,10);
+                    const maxG=Math.max(...sorted.map(e=>e.result!.gross),1);
+                    return <div className="employee-bars">{sorted.map(e=><div key={e.id} className="emp-bar-row"><div className="emp-bar-name">{e.snapshot.name}</div><div className="emp-bar-tracks"><div className="emp-bar-track"><div className="emp-bar-gross" style={{width:`${(e.result!.gross/maxG)*100}%`}}></div><span>{money(e.result!.gross)}</span></div><div className="emp-bar-track deduct"><div className="emp-bar-deduct" style={{width:`${(e.result!.deductions/maxG)*100}%`}}></div><span className="muted">{money(e.result!.deductions)}</span></div></div><div className="emp-bar-net">{money(e.result!.net)}</div></div>)}<div className="chart-legend-row"><span><span className="legend-dot" style={{background:'#ec671b'}}></span>الاستحقاقات</span><span><span className="legend-dot" style={{background:'#f4c7b0'}}></span>الاستقطاعات</span><span className="muted">الرقم الأخضر = الصافي</span></div></div>;
+                  })()}
+                </div>
+              </section>
+              <section className="card">
+                <div className="card-head"><h3>تفصيل تكلفة مراكز العمل</h3><span>{monthName(period.month)}</span></div>
                 <table>
-                  <thead><tr><th>مركز التكلفة</th><th>عدد الموظفين</th><th>الاستحقاقات</th><th>الاستقطاعات</th><th>الصافي</th></tr></thead>
+                  <thead><tr><th>مركز التكلفة</th><th>عدد الموظفين</th><th>الاستحقاقات</th><th>الاستقطاعات</th><th>الصافي</th><th>نسبة التكلفة</th></tr></thead>
                   <tbody>
-                    {Array.from(new Set(period.entries.map(e => e.snapshot.costCenter))).map(c => {
-                      const group = period.entries.filter(e => e.snapshot.costCenter === c);
-                      return (
-                        <tr key={c}>
-                          <td><b>{c || 'غير محدد'}</b></td>
-                          <td>{group.length}</td>
-                          <td className="num">{money(group.reduce((s, e) => s + (e.result?.gross || 0), 0))}</td>
-                          <td className="num">{money(group.reduce((s, e) => s + (e.result?.deductions || 0), 0))}</td>
-                          <td className="num strong">{money(group.reduce((s, e) => s + (e.result?.net || 0), 0))}</td>
-                        </tr>
-                      );
-                    })}
+                    {(()=>{
+                      const totalG=total('gross')||1;
+                      return Array.from(new Set(period.entries.map(e=>e.snapshot.costCenter))).map(cc=>{
+                        const group=period.entries.filter(e=>e.snapshot.costCenter===cc);
+                        const g=group.reduce((s,e)=>s+(e.result?.gross||0),0);
+                        const d=group.reduce((s,e)=>s+(e.result?.deductions||0),0);
+                        const n=group.reduce((s,e)=>s+(e.result?.net||0),0);
+                        const pct=Math.round((g/totalG)*100);
+                        return <tr key={cc}><td><b>{cc||'غير محدد'}</b></td><td>{group.length}</td><td className="num">{money(g)}</td><td className="num muted">{money(d)}</td><td className="num strong">{money(n)}</td><td><div className="pct-bar-wrap"><div className="pct-bar" style={{width:`${pct}%`}}></div><span>{pct}%</span></div></td></tr>;
+                      });
+                    })()}
                   </tbody>
                 </table>
               </section>
@@ -1152,7 +1496,7 @@ function App() {
               <section className="card settings-card">
                 <Icon name="lock" size={26}/>
                 <h3>نسخة أخرى. راحة أكبر.</h3>
-                <p>احفظ نسخة على قرص خارجي لحماية العمل عند تعطل الجهاز. تشمل النسخة بيانات الرواتب وكلمة الدخول.</p>
+                <p>قاعدة البيانات محفوظة خارج مجلد البرنامج. لاستخدامها من حساب Windows أو جهاز آخر، احفظ نسخة احتياطية هنا ثم استعدها هناك؛ نقل البرنامج وحده لا ينقل البيانات.</p>
                 <button className="primary full" disabled={busy} onClick={() => run(async () => { const file = await api.call('backup.create'); if (file) notify('حُفظت النسخة الاحتياطية بنجاح'); })}>
                   <Icon name="download"/>حفظ نسخة احتياطية
                 </button>
@@ -1209,7 +1553,7 @@ function App() {
       {/* ── Modals ── */}
       {employee && (
         <EmployeeForm employee={employee} busy={busy} onClose={() => setEmployee(null)}
-          save={v => run(async () => { await api.call('employee.save', v); setEmployee(null); await refresh(); if (period) { const p = await api.call('period.get', period.id); setPeriod(p); } notify('تم حفظ بيانات الموظف وتحديثها في كشوف الرواتب المسودة.'); })}
+          save={v => run(async () => { await api.call('employee.save', v); setEmployee(null); await refresh(); if (period) { const p = await api.call('period.get', period.id); setPeriod(p); } notify('تم حفظ بيانات الموظف. الكشوف الموجودة تحتفظ بلقطتها التاريخية.'); })}
           remove={() => setConfirm({ title: 'حذف سجل الموظف', body: 'سيختفي الموظف من قوائم العمل والكشوف الجديدة. تبقى الرواتب والحركات السابقة محفوظة بأسمه ولا تُحذف. الإيقاف متاح أيضًا من حالة الموظف إذا أردت إعادته للعمل لاحقًا.', action: async () => { await api.call('employee.delete', employee.id); setEmployee(null); await refresh();if(period)await openPeriod(period.id); notify('حُذف الموظف من قوائم العمل وحُفظ تاريخه'); } })}
           onExport={v => { setExportingEmployees([v as Employee]); }}
         />
@@ -1250,6 +1594,52 @@ function App() {
           </div>
         </Modal>
       )}
+      {deletePeriodConfirm && period && (
+        <Modal title="حذف كشف الرواتب" onClose={() => { setDeletePeriodConfirm(false); setDeletePeriodInput(''); }}>
+          <div className="modal-body">
+            <div className="delete-period-warning">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+              <div>
+                <strong>تحذير: هذا الإجراء لا يمكن التراجع عنه</strong>
+                <p>سيُحذف كشف <b>{monthName(period.month)}</b> بما يشمل جميع بيانات الرواتب المدخلة ({period.entries.length} موظف). الحركات اليومية المرتبطة بهذا الشهر ستبقى محفوظة.</p>
+                <p>ستُحفظ نسخة احتياطية تلقائياً قبل الحذف.</p>
+              </div>
+            </div>
+            <Field label={`لتأكيد الحذف، اكتب اسم الشهر: ${monthName(period.month)}`}>
+              <input
+                id="delete-period-confirm-input"
+                type="text"
+                placeholder={monthName(period.month)}
+                value={deletePeriodInput}
+                onChange={e => setDeletePeriodInput(e.target.value)}
+                autoComplete="off"
+              />
+            </Field>
+          </div>
+          <div className="modal-foot">
+            <button className="secondary" onClick={() => { setDeletePeriodConfirm(false); setDeletePeriodInput(''); }}>إلغاء</button>
+            <button
+              className="danger-btn"
+              disabled={busy || deletePeriodInput.trim() !== monthName(period.month)}
+              onClick={() => run(async () => {
+                const deletedId = period.id;
+                await api.call('period.delete', deletedId);
+                setPeriod(null);
+                setSelected([]);
+                await refresh();
+                setDeletePeriodConfirm(false);
+                setDeletePeriodInput('');
+                changePage('dashboard');
+                notify('تم حذف الكشف بنجاح');
+              })}
+            >
+              <Icon name="trash" size={16}/>تأكيد الحذف
+            </button>
+          </div>
+        </Modal>
+      )}
       {imported && (
         <Modal title="مراجعة استيراد الموظفين" wide onClose={() => setImported(null)}>
           <div className="modal-body">
@@ -1281,7 +1671,8 @@ function App() {
         </Modal>
       )}
       {exporting && period && (
-        <ExportModal period={period} ids={selected.length ? selected : entries.map(e => e.id)}
+        <ExportModal period={period} ids={page === 'reports' ? period.entries.map(e => e.id) : (selected.length ? selected : entries.map(e => e.id))}
+          defaultTemplate={page === 'reports' ? 'monthly' : 'slip'}
           busy={busy} close={() => setExporting(false)}
           perform={(method, opts) => run(async () => {
             const result = await api.call(method, opts);

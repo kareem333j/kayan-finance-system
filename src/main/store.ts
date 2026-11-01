@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
-import { calculate, emptyInputs, numeric, defaultFormulas,emptyDaily,type Inputs } from '../domain/payroll';
+import { calculate, emptyInputs, numeric, quantityDecimal, normalizeInputs, normalizeCalculation, defaultFormulas,defaultExpressions,emptyDaily,type Inputs } from '../domain/payroll';
 import { accrualDays,defaultCutoff,monthEnd,todayLocal,validDate } from '../domain/dates';
 import Decimal from 'decimal.js';
 import type { Employee, Entry, Period, Settings, State, ImportRow, FormulaSettings,DailyRecord,DailyTotals,DailyKind } from '../shared/types';
@@ -11,7 +11,7 @@ import {employeeCompanies} from '../shared/types';
 const text = z.string().max(1000).default('');
 const date = z.string().refine(s=>!s || validDate(s),'تاريخ غير صحيح').default('');
 const empSchema = z.object({employerCompany:z.enum(['',...employeeCompanies]).default(''),id:z.string().optional(),code:z.string().trim().min(1,'الكود مطلوب').max(40),name:z.string().trim().min(2,'الاسم مطلوب').max(200),job:text,costCenter:text,startDate:date,endDate:date,paymentMethod:z.enum(['نقدي','بنكي','غير محدد','فودافون كاش','إنستا باي']),bankNote:text,graduation:text,phone:text,nationalId:text,address:text,basic:text,active:z.boolean(),notes:text,version:z.number().int().nonnegative().optional(),birthDate:date,gender:text,maritalStatus:text,nationality:text,email:text,emergencyName:text,emergencyPhone:text,department:text,contractType:text,contractEnd:date,qualification:text,insuranceNumber:text,bankName:text,accountNumber:text,accountHolder:text,walletNumber:text,instapayAddress:text});
-const inputSchema = z.object({ basic:z.string(),assignmentMode:z.enum(['amount','days']),assignmentAmount:z.string(),assignmentDays:z.string(),incentive:z.string(),livingDays:z.string(),transport:z.string(),other:z.string(),advance:z.string(),absenceDays:z.string(),delayUnit:z.enum(['hours','days']),delayQuantity:z.string(),penalties:z.string(),note:text,customValues:z.record(z.string(),z.string()).optional() });
+const inputSchema = z.object({ basic:z.string(),assignmentMode:z.enum(['amount','days']),assignmentAmount:z.string(),assignmentDays:z.string(),overtimeDays:z.string().default('0'),incentive:z.string(),livingDays:z.string(),transport:z.string(),other:z.string(),advance:z.string(),absenceDays:z.string(),doubleAbsenceDays:z.string().default('0'),delayUnit:z.enum(['hours','days']),delayQuantity:z.string(),penaltyUnit:z.enum(['hours','days']).default('hours'),penaltyQuantity:z.string().default('0'),penalties:z.string(),accrualStartDate:date.default(''),note:text,customValues:z.record(z.string(),z.string()).optional() });
 const entrySchema=z.object({periodId:z.string(),id:z.string(),version:z.number().int(),inputs:inputSchema,checked:z.boolean(),effectiveDate:date.optional()});
 const parse = <T>(value:any):T => JSON.parse(value);
 export const normalizeSearch=(s:string)=>s.normalize('NFKC').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/[\u064B-\u065Fـ]/g,'').replace(/\s+/g,' ').trim().toLowerCase();
@@ -58,7 +58,10 @@ export class Store {
   audit(action:string,detail:unknown) {this.db.prepare('INSERT INTO audit(at,action,detail) VALUES (?,?,?)').run(new Date().toISOString(),action,JSON.stringify(this.actor?{...(detail as object),actor:this.actor}:detail));}
   settings():Settings {
     const raw = parse<any>(this.db.prepare('SELECT value FROM settings WHERE key=?').pluck().get('company'));
-    return {...raw, formulas:{...defaultFormulas,...(raw.formulas||{})}};
+    const formulas={...defaultFormulas,...(raw.formulas||{})};
+    const savedDelay=String(formulas.expressions?.delay||'').replace(/\s+/g,'').toLowerCase();
+    if(['delaychargequantity*basic/daysinmonth','delaychargedquantity*basic/daysinmonth','delaydays*basic/daysinmonth','delayquantity*basic/daysinmonth'].includes(savedDelay))formulas.expressions={...formulas.expressions,delay:defaultExpressions.delay};
+    return {...raw, formulas};
   }
   setSettings(value:unknown) {
     const formulaSchema = z.object({ livingDayRate:z.number().min(0).max(10000), fellowshipRate:z.number().min(0).max(1), fellowshipMin:z.number().min(0).max(10000), daysInMonth:z.number().int().min(1).max(31), workingHours:z.number().min(1).max(24), delayByHours:z.boolean(), customFields:z.array(z.object({id:z.string().regex(/^[A-Za-z_][A-Za-z_0-9]*$/).max(50),name:z.string().trim().min(1).max(80),type:z.enum(['earning','deduction']),formula:z.string().max(500),mode:z.enum(['formula','fixed','manual']).optional(),value:z.string().optional()})).max(30),expressions:z.record(z.string(),z.string().max(500)).optional(),constants:z.record(z.string(),z.string()).optional(),revision:z.number().optional(),monthlyAccrual:z.enum(['onDate','prorated']).optional() }).partial();
@@ -80,10 +83,35 @@ export class Store {
       if(data.paymentMethod==='فودافون كاش'&&!/^01\d{9}$/.test(data.walletNumber))throw new Error('رقم محفظة فودافون كاش يجب أن يكون 11 رقمًا ويبدأ بـ01');
       if(data.paymentMethod==='إنستا باي'&&!data.instapayAddress.trim())throw new Error('أدخل عنوان الدفع على إنستا باي');
       const employee={...(old?parse<Employee>(old.data):{}),...data,id:data.id||this.newId(),version:(old?.version||0)+1} as Employee;
+      const codeOwner=this.db.prepare('SELECT data FROM employees WHERE code=? AND id<>?').get(employee.code,employee.id) as any;
+      if(codeOwner){const owner=parse<Employee>(codeOwner.data);throw new Error(owner.deletedAt?`الكود مرتبط بسجل الموظف المحذوف ${owner.name}؛ اختر كودًا آخر للحفاظ على تاريخ الرواتب`:`الكود مستخدم بالفعل بواسطة ${owner.name}`);}
       try { this.db.prepare('INSERT INTO employees(id,code,name_key,data,version) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET code=excluded.code,name_key=excluded.name_key,data=excluded.data,version=excluded.version').run(employee.id,employee.code,normalizeSearch(employee.name),JSON.stringify(employee),employee.version); }
-      catch(e:any){if(e.message?.includes('UNIQUE')) throw new Error('كود الموظف مستخدم بالفعل');throw e;}
+      catch(e:any){if(e.message?.includes('UNIQUE')&&e.message?.includes('employees.code'))throw new Error('الكود مستخدم في سجل موظف آخر؛ أعد تحميل قائمة الموظفين وتحقق من السجلات المحذوفة');throw e;}
+      // Propagate profile changes to all open draft periods:
+      // • new employee  → ensureDraftEmployee inserts it (refreshSnapshot=false)
+      // • edited employee → ensureDraftEmployee updates snapshot (refreshSnapshot=true)
+      // Approved periods are excluded by the WHERE status='draft' filter.
+      for(const period of this.db.prepare("SELECT id,month FROM periods WHERE status='draft'").all() as any[])this.ensureDraftEmployee(employee,period.id,period.month,!!old);
       this.audit(old?'تعديل موظف':'إضافة موظف',{id:employee.id,before:old?parse(old.data):null,after:employee});return employee;
     })();
+  }
+  private employeeEligibleForMonth(employee:Employee,month:string){const next=new Date(`${month}-01T00:00:00Z`);next.setUTCMonth(next.getUTCMonth()+1);const end=next.toISOString().slice(0,10);return (employee.active||!!employee.endDate&&employee.endDate>=`${month}-01`)&&(!employee.startDate||employee.startDate<end)&&(!employee.endDate||employee.endDate>=`${month}-01`);}
+  private ensureDraftEmployee(employee:Employee,periodId:string,month:string,refreshSnapshot=false){
+    const row=this.db.prepare('SELECT snapshot FROM entries WHERE period_id=? AND employee_id=?').get(periodId,employee.id) as any;
+    if(!row){
+      // Employee not yet in this draft period — insert if eligible.
+      if(!this.employeeEligibleForMonth(employee,month))return false;
+      this.db.prepare('INSERT INTO entries(id,period_id,employee_id,snapshot,inputs) VALUES (?,?,?,?,?)').run(this.newId(),periodId,employee.id,JSON.stringify(employee),JSON.stringify(emptyInputs(employee.basic)));
+      return true;
+    }
+    if(refreshSnapshot){
+      // Called from saveEmployee after a profile edit.
+      // Update snapshot only — preserve the user-entered inputs unchanged.
+      // Approved periods never reach this branch (caller filters status='draft').
+      this.db.prepare('UPDATE entries SET snapshot=? WHERE period_id=? AND employee_id=?').run(JSON.stringify(employee),periodId,employee.id);
+    }
+    // refreshSnapshot=false (syncPeriod path): leave existing entries untouched.
+    return false;
   }
   removeEmployee(id:unknown) {const key=z.string().parse(id);return this.db.transaction(()=>{const row=this.db.prepare('SELECT data FROM employees WHERE id=?').get(key) as any;if(!row)throw Error('الموظف غير موجود');const old=parse<Employee>(row.data);if(old.deletedAt)return true;const next={...old,active:false,deletedAt:new Date().toISOString(),version:old.version+1};this.db.prepare('UPDATE employees SET data=?,version=? WHERE id=?').run(JSON.stringify(next),next.version,key);this.audit('حذف موظف من قوائم العمل مع حفظ التاريخ',{id:key,before:old,after:next});return true;})();}
   resetPreview(month?:string){if(month&&!/^20\d{2}-(0[1-9]|1[0-2])$/.test(month))throw Error('اختر شهرًا صحيحًا');const count=(sql:string,...args:any[])=>Number(this.db.prepare(sql).pluck().get(...args));return {month:month||null,periods:count('SELECT COUNT(*) FROM periods'+(month?' WHERE month=?':''),...(month?[month]:[])),entries:count('SELECT COUNT(*) FROM entries'+(month?' WHERE period_id IN(SELECT id FROM periods WHERE month=?)':''),...(month?[month]:[])),daily:count('SELECT COUNT(*) FROM daily_records'+(month?' WHERE substr(date,1,7)=?':''),...(month?[month]:[])),employees:this.employees().length,revision:count('SELECT COALESCE(MAX(id),0) FROM audit'),confirmation:month?`RESET ${month}`:'RESET ALL'};}
@@ -94,10 +122,25 @@ export class Store {
     return this.db.transaction(()=>{
       if(this.db.prepare('SELECT 1 FROM periods WHERE month=?').get(month)) throw new Error('كشف رواتب هذا الشهر موجود بالفعل');
       const id=this.newId();this.db.prepare('INSERT INTO periods(id,month,status,created_at) VALUES (?,?,?,?)').run(id,month,'draft',new Date().toISOString());
-      const next=new Date(`${month}-01T00:00:00Z`);next.setUTCMonth(next.getUTCMonth()+1);const end=next.toISOString().slice(0,10);
-      const list=this.employees().filter(e=>(e.active || (!!e.endDate && e.endDate>=`${month}-01`)) && (!e.startDate || e.startDate<end) && (!e.endDate || e.endDate>=`${month}-01`));
+      const list=this.employees().filter(e=>this.employeeEligibleForMonth(e,month));
       for(const e of list) this.db.prepare('INSERT INTO entries(id,period_id,employee_id,snapshot,inputs) VALUES (?,?,?,?,?)').run(this.newId(),id,e.id,JSON.stringify(e),JSON.stringify(emptyInputs(e.basic)));
       this.audit('إنشاء كشف',{month,count:list.length});return this.period(id);
+    })();
+  }
+  deletePeriod(id: unknown) {
+    const key = z.string().parse(id);
+    return this.db.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM periods WHERE id=?').get(key) as any;
+      if (!row) throw new Error('الكشف غير موجود');
+      if (row.status === 'approved') throw new Error('لا يمكن حذف كشف معتمد؛ استخدم إعادة الضبط من لوحة الإدارة إذا كنت متأكداً');
+      // Delete input_history rows for all entries in this period first (FK constraint)
+      this.db.prepare('DELETE FROM input_history WHERE entry_id IN (SELECT id FROM entries WHERE period_id=?)').run(key);
+      // Delete all entries for this period
+      this.db.prepare('DELETE FROM entries WHERE period_id=?').run(key);
+      // Delete the period itself
+      this.db.prepare('DELETE FROM periods WHERE id=?').run(key);
+      this.audit('حذف كشف رواتب', { month: row.month, status: row.status, createdAt: row.created_at });
+      return true;
     })();
   }
   syncPeriod(id: unknown) {
@@ -107,19 +150,11 @@ export class Store {
       if (p.status !== 'draft') throw new Error('لا يمكن مزامنة كشف معتمد');
       const existing = new Set(p.entries.map(e=>e.employeeId));
       const month = p.month;
-      const next=new Date(`${month}-01T00:00:00Z`);next.setUTCMonth(next.getUTCMonth()+1);const end=next.toISOString().slice(0,10);
-      const list=this.employees().filter(e=>(e.active || (!!e.endDate && e.endDate>=`${month}-01`)) && (!e.startDate || e.startDate<end) && (!e.endDate || e.endDate>=`${month}-01`));
+      const list=this.employees().filter(e=>this.employeeEligibleForMonth(e,month));
       let added = 0;
       for (const e of list) {
-        if (!existing.has(e.id)) {
-          this.db.prepare('INSERT INTO entries(id,period_id,employee_id,snapshot,inputs) VALUES (?,?,?,?,?)')
-            .run(this.newId(),p.id,e.id,JSON.stringify(e),JSON.stringify(emptyInputs(e.basic)));
-          added++;
-        } else {
-          // Update snapshot for existing entries too (reflects name/job changes)
-          this.db.prepare('UPDATE entries SET snapshot=?,checked=0,version=version+1 WHERE period_id=? AND employee_id=? AND (SELECT status FROM periods WHERE id=period_id)=\'draft\'')
-            .run(JSON.stringify(e), p.id, e.id);
-        }
+        if(!existing.has(e.id)&&this.ensureDraftEmployee(e,p.id,month))added++;
+        else if(existing.has(e.id))this.ensureDraftEmployee(e,p.id,month);
       }
       this.audit('تحديث الكشف',{month:p.month,added});
       return this.period(p.id);
@@ -131,26 +166,25 @@ export class Store {
     return this.db.transaction(()=>{
       const emp = this.employees().find(e=>e.id===key);
       if (!emp) throw new Error('الموظف غير موجود');
-      // Update snapshot in all DRAFT entries for this employee
-      this.db.prepare(`UPDATE entries SET snapshot=?,checked=0,version=version+1 WHERE employee_id=? AND period_id IN (SELECT id FROM periods WHERE status='draft')`)
-        .run(JSON.stringify(emp), key);
-      this.audit('تحديث بيانات الموظف في الكشوف', {employee: emp.name});
+      for(const period of this.db.prepare("SELECT id,month FROM periods WHERE status='draft'").all() as any[])this.ensureDraftEmployee(emp,period.id,period.month);
+      this.audit('مزامنة الموظف مع المسودات دون تغيير اللقطات القائمة', {employee: emp.name});
       return true;
     })();
   }
-  private monthlyContext(p:{month:string},e:Entry,settings:Settings){const days=accrualDays(p.month,monthEnd(p.month),e.snapshot.startDate,e.snapshot.endDate,settings.formulas.daysInMonth);return {daily:e.daily,accrualDays:days,monthlyRatio:settings.formulas.monthlyAccrual==='prorated'?new Decimal(days).div(settings.formulas.daysInMonth).toFixed():'1'};}
+  private monthlyContext(p:{month:string},e:Entry,settings:Settings,inputs:Inputs=e.inputs){const startDate=inputs.accrualStartDate||e.snapshot.startDate;if(inputs.accrualStartDate&&(!validDate(inputs.accrualStartDate)||!inputs.accrualStartDate.startsWith(p.month)))throw new Error('بداية الاستحقاق يجب أن تكون داخل شهر الكشف');const days=accrualDays(p.month,monthEnd(p.month),startDate,e.snapshot.endDate,settings.formulas.daysInMonth);return {daily:e.daily,accrualDays:days,monthlyRatio:settings.formulas.monthlyAccrual==='prorated'?new Decimal(days).div(settings.formulas.daysInMonth).toFixed():'1'};}
   period(id:unknown,requestedDate?:string):Period {
     const key=z.string().parse(id);const p=this.db.prepare('SELECT * FROM periods WHERE id=?').get(key) as any;if(!p) throw new Error('الكشف غير موجود');
-    const policy=p.policy?parse<Settings>(p.policy):this.settings();policy.formulas={...defaultFormulas,...policy.formulas};
+    const policy=p.policy?parse<Settings>(p.policy):this.settings();policy.formulas={...defaultFormulas,...policy.formulas};const savedDelay=String(policy.formulas.expressions?.delay||'').replace(/\s+/g,'').toLowerCase();if(['delaychargequantity*basic/daysinmonth','delaychargedquantity*basic/daysinmonth','delaydays*basic/daysinmonth','delayquantity*basic/daysinmonth'].includes(savedDelay))policy.formulas.expressions={...policy.formulas.expressions,delay:defaultExpressions.delay};
     const asOf=requestedDate||defaultCutoff(p.month);if(!validDate(asOf)||!asOf.startsWith(p.month))throw new Error('تاريخ الاحتساب يجب أن يكون داخل الشهر');
     const allDaily=this.dailyRecords(p.month);const totals=(employeeId:string,cutoff:string)=>{const t=emptyDaily();for(const r of allDaily)if(r.employeeId===employeeId&&!r.voided&&r.date<=cutoff)t[r.kind]=new Decimal(t[r.kind]).plus(r.quantity).toFixed();return t;};
     const entries=(this.db.prepare('SELECT * FROM entries WHERE period_id=? ORDER BY rowid').all(key) as any[]).map(r=>{
-      const entry:Entry={id:r.id,employeeId:r.employee_id,snapshot:parse(r.snapshot),inputs:parse(r.inputs),checked:!!r.checked,version:r.version,paid:!!r.paid,result:r.result?parse(r.result):null};
+      const entry:Entry={id:r.id,employeeId:r.employee_id,snapshot:parse(r.snapshot),inputs:normalizeInputs(parse(r.inputs)),checked:!!r.checked,version:r.version,paid:!!r.paid,result:r.result?normalizeCalculation(parse(r.result)):null};
       entry.daily=totals(entry.employeeId,monthEnd(p.month));
       if(p.status==='draft')try{entry.result=calculate(entry.inputs,policy.formulas,policy.penaltiesEnabled,this.monthlyContext(p,entry,policy));}catch(e:any){entry.result=null;entry.error=e.message;}
       else if(entry.result)entry.result.amounts={...entry.result.amounts,dailyDeduction:entry.result.amounts.dailyDeduction??0};
-      entry.eligibleDays=accrualDays(p.month,asOf,entry.snapshot.startDate,entry.snapshot.endDate,policy.formulas.daysInMonth);
       entry.effectiveInputs=this.inputsAt(entry.id,asOf,entry.inputs);
+      const accrualStart=entry.effectiveInputs.accrualStartDate||entry.snapshot.startDate;
+      entry.eligibleDays=accrualDays(p.month,asOf,accrualStart,entry.snapshot.endDate,policy.formulas.daysInMonth);
       try{entry.accrued=calculate(entry.effectiveInputs,policy.formulas,policy.penaltiesEnabled,{daily:totals(entry.employeeId,asOf),accrualDays:entry.eligibleDays,monthlyRatio:policy.formulas.monthlyAccrual==='prorated'?new Decimal(entry.eligibleDays).div(policy.formulas.daysInMonth).toFixed():'1'});}catch(e:any){entry.accrued=null;entry.accruedError=e.message;}
       if(p.status==='approved'&&asOf===monthEnd(p.month))entry.accrued=entry.result;
       return entry;
@@ -159,7 +193,7 @@ export class Store {
   }
   inputsAt(entryId:string,cutoff:string,fallback:Inputs):Inputs{
     const rows=this.db.prepare('SELECT patch FROM input_history WHERE entry_id=? AND effective_date<=? ORDER BY effective_date,id').all(entryId,cutoff) as any[];
-    if(!rows.length)return {...fallback};let result=emptyInputs();for(const r of rows){const patch=parse<Partial<Inputs>>(r.patch);result={...result,...patch,customValues:{...result.customValues,...patch.customValues}};}return result;
+    if(!rows.length)return normalizeInputs(fallback);let result=emptyInputs();for(const r of rows){const patch=parse<Partial<Inputs>>(r.patch);result=normalizeInputs({...result,...patch,customValues:{...result.customValues,...patch.customValues}});}return result;
   }
   private writeInputs(entry:Entry,inputs:Inputs,month:string,effectiveDate:string){
     if(!validDate(effectiveDate)||!effectiveDate.startsWith(month))throw new Error('تاريخ سريان القيم يجب أن يكون داخل الشهر');
@@ -175,7 +209,7 @@ export class Store {
       const old=p.entries.find(e=>e.id===v.id);if(!old) throw new Error('السطر غير موجود');if(old.version!==v.version) throw new Error('تغيرت البيانات؛ أعد فتح السطر');
       const settings = this.settings();
       const inputs=this.writeInputs(old,v.inputs,p.month,v.effectiveDate||defaultCutoff(p.month));
-      const result=calculate(inputs,settings.formulas,settings.penaltiesEnabled,this.monthlyContext(p,old,settings));
+      const result=calculate(inputs,settings.formulas,settings.penaltiesEnabled,this.monthlyContext(p,old,settings,inputs));
       this.db.prepare('UPDATE entries SET inputs=?,result=?,checked=?,version=version+1 WHERE id=?').run(JSON.stringify(inputs),JSON.stringify(result),+v.checked,v.id);
       this.audit('تعديل راتب',{month:p.month,employee:old.snapshot.name,employeeId:old.employeeId,before:old.inputs,after:v.inputs,checked:v.checked});return this.period(p.id);
     })();
@@ -185,7 +219,7 @@ export class Store {
     if(new Set(list.map(v=>v.periodId)).size!==1||new Set(list.map(v=>v.id)).size!==list.length)throw new Error('الدفعة يجب أن تخص كشفًا واحدًا دون صفوف مكررة');
     return this.db.transaction(()=>{
       const p=this.period(list[0].periodId);if(p.status!=='draft')throw new Error('الكشف معتمد ولا يقبل التعديل');const entries=new Map(p.entries.map(e=>[e.id,e]));const settings=this.settings();
-      for(const v of list){const old=entries.get(v.id);if(!old||old.version!==v.version)throw new Error('تغيرت بيانات أحد الصفوف؛ أعد تحميل الكشف');const inputs=this.writeInputs(old,v.inputs,p.month,v.effectiveDate||defaultCutoff(p.month));const result=calculate(inputs,settings.formulas,settings.penaltiesEnabled,this.monthlyContext(p,old,settings));this.db.prepare('UPDATE entries SET inputs=?,result=?,checked=?,version=version+1 WHERE id=?').run(JSON.stringify(inputs),JSON.stringify(result),+v.checked,v.id);this.audit('تعديل راتب جماعي',{month:p.month,employee:old.snapshot.name,employeeId:old.employeeId,before:old.inputs,after:inputs,checked:v.checked});}
+      for(const v of list){const old=entries.get(v.id);if(!old||old.version!==v.version)throw new Error('تغيرت بيانات أحد الصفوف؛ أعد تحميل الكشف');const inputs=this.writeInputs(old,v.inputs,p.month,v.effectiveDate||defaultCutoff(p.month));const result=calculate(inputs,settings.formulas,settings.penaltiesEnabled,this.monthlyContext(p,old,settings,inputs));this.db.prepare('UPDATE entries SET inputs=?,result=?,checked=?,version=version+1 WHERE id=?').run(JSON.stringify(inputs),JSON.stringify(result),+v.checked,v.id);this.audit('تعديل راتب جماعي',{month:p.month,employee:old.snapshot.name,employeeId:old.employeeId,before:old.inputs,after:inputs,checked:v.checked});}
       return this.period(p.id);
     })();
   }
@@ -194,7 +228,7 @@ export class Store {
       const p=this.period(id); if(p.status!=='draft') throw new Error('الكشف معتمد بالفعل');
       const settings=this.settings();if(!settings.roundingAccepted) throw new Error('ثبّت سياسة التقريب من الإعدادات أولًا');
       if(!p.entries.length) throw new Error('الكشف لا يحتوي موظفين');
-      for(const e of p.entries){if(!e.checked) throw new Error(`راجع راتب ${e.snapshot.name} وأكد اكتمال البيانات`); const result=calculate(e.inputs,settings.formulas,settings.penaltiesEnabled,this.monthlyContext(p,e,settings));if(result.amounts.basic<=0) throw new Error(`الأساسي يجب أن يكون أكبر من صفر: ${e.snapshot.name}`);if(result.net<0) throw new Error(`صافي سالب: ${e.snapshot.name}`);if(new Decimal(numeric(e.inputs.absenceDays)).plus(e.daily?.absence||0).gt(Number(monthEnd(p.month).slice(8))))throw new Error(`راجع إجمالي الغياب: ${e.snapshot.name}`); this.db.prepare('UPDATE entries SET result=? WHERE id=?').run(JSON.stringify(result),e.id);}
+      for(const e of p.entries){/* checked is optional — no longer blocks approval */ const result=calculate(e.inputs,settings.formulas,settings.penaltiesEnabled,this.monthlyContext(p,e,settings));if(result.amounts.basic<=0) throw new Error(`الأساسي يجب أن يكون أكبر من صفر: ${e.snapshot.name}`);if(result.net<0) throw new Error(`صافي سالب: ${e.snapshot.name}`);const absentDays=new Decimal(numeric(e.inputs.absenceDays)).plus(e.daily?.absence||0).plus(numeric(e.inputs.doubleAbsenceDays)).plus(e.daily?.doubleAbsence||0);if(absentDays.gt(Number(monthEnd(p.month).slice(8))))throw new Error(`راجع إجمالي الغياب: ${e.snapshot.name}`); this.db.prepare('UPDATE entries SET result=? WHERE id=?').run(JSON.stringify(result),e.id);}
       this.db.prepare('UPDATE periods SET status=?,approved_at=?,policy=? WHERE id=?').run('approved',new Date().toISOString(),JSON.stringify(settings),p.id);this.audit('اعتماد كشف',{month:p.month,count:p.entries.length});return this.period(p.id);
     })();
   }
@@ -208,7 +242,6 @@ export class Store {
         if(r.matchId&&(!old||old.version!==r.matchVersion))throw Error('تغير سجل الموظف؛ أعد معاينة الاستيراد');
         const {id:ignoredId,version:ignoredVersion,deletedAt:ignoredDeleted,...fields}=r.employee;
         const e=this.saveEmployee({name:r.name,paymentMethod:'غير محدد',basic:'',active:true,...old,...fields,code:fields.code||old?.code||`EMP-${this.newId().slice(0,8)}`,...(old?{id:old.id,version:r.matchVersion}:{})});
-        if(old)this.refreshSnapshots(e.id);
         this.db.prepare('INSERT INTO imports VALUES (?,?,?)').run(fingerprint,r.row,e.id);count++;continue;
       }
       let code=r.code && /^\d+$/.test(r.code)?`EMP-${r.code}`:`EMP-${String(r.row).padStart(4,'0')}`;
@@ -220,8 +253,8 @@ export class Store {
   imported(fingerprint:string,row:number) {return !!this.db.prepare('SELECT 1 FROM imports WHERE fingerprint=? AND source_row=?').get(fingerprint,row);}
   dailyRecords(month:unknown):DailyRecord[]{const m=z.string().regex(/^20\d{2}-(0[1-9]|1[0-2])$/).parse(month);return (this.db.prepare('SELECT * FROM daily_records WHERE date>=? AND date<=? ORDER BY date DESC,created_at DESC').all(`${m}-01`,monthEnd(m)) as any[]).map(r=>({id:r.id,requestId:r.request_id,employeeId:r.employee_id,date:r.date,kind:r.kind,quantity:r.quantity,note:r.note,version:r.version,voided:!!r.voided,createdAt:r.created_at}));}
   saveDaily(value:unknown){
-    const v=z.object({id:z.string().optional(),requestId:z.string().min(8).max(100),employeeId:z.string(),date:z.string().refine(validDate),kind:z.enum(['absence','delay','deduction','incentive','living','transport','other','advance','assignment']),quantity:z.string(),note:z.string().trim().min(1,'اكتب سبب الحركة').max(500),version:z.number().int().optional()}).parse(value);
-    const quantity=numeric(v.quantity,'الكمية');if(new Decimal(quantity).lte(0))throw new Error('الكمية يجب أن تكون أكبر من صفر');
+    const v=z.object({id:z.string().optional(),requestId:z.string().min(8).max(100),employeeId:z.string(),date:z.string().refine(validDate),kind:z.enum(['absence','doubleAbsence','delay','deduction','incentive','living','transport','other','advance','assignment']),quantity:z.string(),note:z.string().trim().min(1,'اكتب سبب الحركة').max(500),version:z.number().int().optional()}).parse(value);
+    const quantityValue=v.kind==='delay'?quantityDecimal(v.quantity,'الكمية','hours'):new Decimal(numeric(v.quantity,'الكمية'));const quantity=quantityValue.toDecimalPlaces(24).toFixed();if(quantityValue.lte(0))throw new Error('الكمية يجب أن تكون أكبر من صفر');
     return this.db.transaction(()=>{
       const duplicate=this.db.prepare('SELECT id FROM daily_records WHERE request_id=?').get(v.requestId) as any;if(duplicate&&!v.id)return {id:duplicate.id,replayed:true};
       const emp=this.employees().find(e=>e.id===v.employeeId);if(!emp)throw new Error('الموظف غير موجود');if((emp.startDate&&v.date<emp.startDate)||(emp.endDate&&v.date>emp.endDate))throw new Error('التاريخ خارج فترة عمل الموظف');if(!emp.active&&!emp.endDate)throw new Error('الموظف متوقف؛ حدد تاريخ انتهاء عمله أولًا');
@@ -229,7 +262,7 @@ export class Store {
       if(v.id&&(!old||old.voided||old.version!==v.version))throw new Error('تغيرت الحركة؛ أعد تحميل اليوم');
       for(const month of new Set([v.date.slice(0,7),old?.date?.slice(0,7)].filter(Boolean))){if(this.db.prepare("SELECT 1 FROM periods WHERE month=? AND status='approved'").get(month))throw new Error('الشهر معتمد؛ لا يمكن تغيير حركاته اليومية');}
       const same=this.dailyRecords(v.date.slice(0,7)).filter(r=>!r.voided&&r.id!==v.id&&r.employeeId===v.employeeId&&r.date===v.date&&r.kind===v.kind);
-      if(v.kind==='absence'&&same.reduce((s,r)=>s.plus(r.quantity),new Decimal(quantity)).gt(1))throw new Error('إجمالي الغياب في اليوم لا يتجاوز يومًا واحدًا');
+      if(v.kind==='absence'||v.kind==='doubleAbsence'){const sameDayAbsence=this.dailyRecords(v.date.slice(0,7)).filter(r=>!r.voided&&r.id!==v.id&&r.employeeId===v.employeeId&&r.date===v.date&&(r.kind==='absence'||r.kind==='doubleAbsence'));if(sameDayAbsence.reduce((s,r)=>s.plus(r.quantity),new Decimal(quantity)).gt(1))throw new Error('إجمالي الغياب في اليوم لا يتجاوز يومًا واحدًا');}
       if(v.kind==='delay'&&same.reduce((s,r)=>s.plus(r.quantity),new Decimal(quantity)).gt(24))throw new Error('إجمالي الساعات في اليوم لا يتجاوز 24 ساعة');
       const month=v.date.slice(0,7);const periodRow=this.db.prepare('SELECT id FROM periods WHERE month=?').get(month) as any;if(!periodRow)this.createPeriod(month);else if(!this.db.prepare('SELECT 1 FROM entries WHERE period_id=? AND employee_id=?').get(periodRow.id,v.employeeId))this.syncPeriod(periodRow.id);
       const id=v.id||this.newId();if(old)this.db.prepare('UPDATE daily_records SET employee_id=?,date=?,kind=?,quantity=?,note=?,version=version+1 WHERE id=?').run(v.employeeId,v.date,v.kind,quantity,v.note,id);else this.db.prepare('INSERT INTO daily_records(id,request_id,employee_id,date,kind,quantity,note,created_at) VALUES (?,?,?,?,?,?,?,?)').run(id,v.requestId,v.employeeId,v.date,v.kind,quantity,v.note,new Date().toISOString());
